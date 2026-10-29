@@ -107,9 +107,6 @@ pub struct TerminalSnapshot {
     pub cols: u16,
     pub rows: u16,
     pub cursor: Option<(u16, u16)>,
-    pub title: String,
-    pub cwd: PathBuf,
-    pub exited: bool,
 }
 
 struct Metadata {
@@ -398,6 +395,11 @@ impl TerminalSession {
     /// can give their child processes the termination grace period in parallel.
     pub fn shutdown(&self) {
         self.shared.stopped.store(true, Ordering::Release);
+    }
+
+    /// Window metadata reads must not acknowledge pending terminal rendering.
+    pub fn title(&self) -> String {
+        self.shared.metadata.lock().title.clone()
     }
 
     pub fn is_dirty(&self) -> bool {
@@ -710,7 +712,6 @@ impl TerminalSession {
     }
 
     pub fn snapshot(&self) -> TerminalSnapshot {
-        let cwd = self.cwd();
         let term = self.term.lock();
         // Clear while holding the grid lock: the reader's next mutation must
         // then schedule another wake, so no output is lost to a reset race.
@@ -778,9 +779,6 @@ impl TerminalSession {
             cols: term.columns() as u16,
             rows: term.screen_lines() as u16,
             cursor,
-            title: self.shared.metadata.lock().title.clone(),
-            cwd,
-            exited: self.is_exited(),
         }
     }
 }
@@ -1301,11 +1299,45 @@ mod tests {
     fn real_pty_preserves_ansi_unicode_and_exit() {
         let session = shell("printf '\\033[31mhello中\\033[0m\\n'", Path::new("/tmp"));
         let snapshot = until(&session, |s| {
-            s.exited && s.cells.iter().any(|c| c.text == "中")
+            session.is_exited() && s.cells.iter().any(|c| c.text == "中")
         });
         let first = snapshot.cells.iter().find(|c| c.text == "h").unwrap();
         assert_eq!(first.fg, palette(1));
         assert!(session.child_pid().is_some());
+    }
+
+    #[test]
+    fn title_read_preserves_pending_output_until_the_last_character_is_rendered() {
+        let session = shell(
+            "printf '\\033]0;LeafTerm title test\\007git statu'; exec /bin/sleep 30",
+            Path::new("/tmp"),
+        );
+        let line = |snapshot: &TerminalSnapshot| {
+            snapshot
+                .cells
+                .iter()
+                .filter(|cell| cell.row == 0)
+                .map(|cell| cell.text.as_str())
+                .collect::<String>()
+        };
+        until(&session, |snapshot| line(snapshot) == "gitstatu");
+
+        // Model the exact reader -> AboutToWait -> queued Wake order without
+        // relying on a race between real keyboard and event-loop timing.
+        let mut parser: Processor = Processor::new();
+        parser.advance(&mut *session.term.lock(), b"s");
+        session.shared.changed();
+        assert!(session.is_dirty());
+        assert_eq!(session.title(), "LeafTerm title test");
+        let _ = session.cwd();
+        assert!(!session.is_exited());
+        assert!(
+            session.is_dirty(),
+            "reading the title must not consume the pending frame"
+        );
+
+        // The queued Wake can now trigger this frame without a second input.
+        assert_eq!(line(&session.snapshot()), "gitstatus");
     }
 
     #[test]
@@ -1391,8 +1423,8 @@ mod tests {
         std::thread::sleep(Duration::from_millis(550));
         assert_eq!(session.cwd(), working.canonicalize().unwrap());
         session.send_key("Enter", false, false, false).unwrap();
-        until(&session, |s| {
-            s.cwd == working.join("leaf_beta").canonicalize().unwrap()
+        until(&session, |_| {
+            session.cwd() == working.join("leaf_beta").canonicalize().unwrap()
         });
     }
 

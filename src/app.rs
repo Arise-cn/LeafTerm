@@ -2833,14 +2833,15 @@ impl App {
             let title = if self.name.is_empty() {
                 self.active_session()
                     .map(|session| {
-                        let snapshot = session.snapshot();
-                        if snapshot.exited {
+                        if session.is_exited() {
                             "Session ended".into()
                         } else {
-                            let label = if snapshot.title.is_empty() {
-                                name_of(&snapshot.cwd)
+                            // Reading chrome must not consume the terminal's pending redraw.
+                            let title = session.title();
+                            let label = if title.is_empty() {
+                                name_of(&session.cwd())
                             } else {
-                                snapshot.title.chars().take(80).collect()
+                                title.chars().take(80).collect()
                             };
                             if session.has_running_job() {
                                 format!("{label} · running")
