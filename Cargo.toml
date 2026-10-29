@@ -1,0 +1,31 @@
+[package]
+name = "leafterm"
+version = "0.1.0"
+edition = "2024"
+description = "A GPU-rendered Rust terminal with a Git-aware file tree"
+repository = "https://github.com/Arise-cn/LeafTerm"
+
+[dependencies]
+anyhow = "1"
+# Pins upstream fixes for bounded zero-width cells and the Kitty mode stack.
+alacritty_terminal = { git = "https://github.com/alacritty/alacritty.git", rev = "542147067dd016fc5f49120ef0ba605a98a4e3a7" }
+portable-pty = "0.9"
+parking_lot = "0.12"
+winit = "0.30"
+pollster = "0.4"
+wgpu = { version = "25", default-features = false, features = ["metal", "wgsl"] }
+glyphon = "0.9"
+bytemuck = { version = "1", features = ["derive"] }
+arboard = "3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tempfile = "3"
+unicode-segmentation = "1.13"
+unicode-width = "0.2"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+libc = "0.2"
+
+[profile.release]
+lto = "thin"
+strip = "debuginfo"

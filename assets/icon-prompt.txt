@@ -1,0 +1,7 @@
+Use case: logo-brand.
+Asset type: production macOS application icon for a lightweight GPU terminal named LeafTerm.
+Primary request: one polished, memorable icon combining an abstract leaf with a terminal command prompt.
+Composition: square 1024x1024 canvas; a centered deep charcoal green rounded-square tile filling about 84% of the canvas, with transparent space around the tile for macOS Dock breathing room. On the tile, one large simple mint-green leaf emblem, shaped so a clean negative-space > command prompt is integrated into its central vein. The leaf and prompt read as a single bold mark. A tiny short horizontal cursor stroke can sit naturally at the base if it improves recognition. Keep excellent legibility at 32 pixels.
+Style: restrained geometric vector-like app icon, crisp edges, smooth curves, subtle depth and very restrained lighting only on the dark tile; no photorealistic texture.
+Color palette: near-black green #11181C tile; mint #6DDEAA emblem, optional gentle lighter mint at the upper edge.
+Constraints: centered balanced silhouette, generous but not excessive padding, no words, no letters, no tagline, no watermark, no extra frame, no surrounding scene, one icon only, transparent outside the rounded tile.
