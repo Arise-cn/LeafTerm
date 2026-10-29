@@ -238,6 +238,10 @@ impl TerminalSession {
         let rows = rows.clamp(1, 500);
         let cwd = cwd.canonicalize().context("Open terminal directory")?;
         command.cwd(&cwd);
+        // A GUI launched by an automation tool may inherit NO_COLOR=1. The
+        // interactive PTY supports color; shell startup files and individual
+        // commands can still opt out after the shell has started.
+        command.env_remove("NO_COLOR");
         command.env("TERM", "xterm-256color");
         command.env("COLORTERM", "truecolor");
         command.env("TERM_PROGRAM", "LeafTerm");
@@ -1304,6 +1308,49 @@ mod tests {
         let first = snapshot.cells.iter().find(|c| c.text == "h").unwrap();
         assert_eq!(first.fg, palette(1));
         assert!(session.child_pid().is_some());
+    }
+
+    #[test]
+    fn interactive_pty_clears_inherited_no_color_and_preserves_ansi_colors() {
+        let mut command = CommandBuilder::new("/bin/sh");
+        command.env("TERM", "dumb");
+        command.env("COLORTERM", "");
+        command.env("NO_COLOR", "1");
+        command.args([
+            "-c",
+            r#"
+            printf 'TERM=%s;COLORTERM=%s;NO_COLOR=%s\n' "$TERM" "$COLORTERM" "${NO_COLOR-unset}"
+            if [ -t 1 ] && [ -z "${NO_COLOR-}" ]; then
+                printf '\033[31mR\033[0m\n\033[38;5;208mO\033[0m\n\033[38;2;90;180;240mB\033[0m\n'
+            fi
+            NO_COLOR=1 /bin/sh -c 'printf "OVERRIDE=%s\n" "$NO_COLOR"'
+        "#,
+        ]);
+        let session =
+            TerminalSession::spawn_command(Path::new("/tmp"), 100, 24, command, Arc::new(|| {}))
+                .unwrap();
+        let snapshot = until(&session, |s| {
+            session.is_exited()
+                && s.cells
+                    .iter()
+                    .map(|c| c.text.as_str())
+                    .collect::<String>()
+                    .contains("OVERRIDE=1")
+        });
+        let text: String = snapshot.cells.iter().map(|c| c.text.as_str()).collect();
+        assert!(text.contains("TERM=xterm-256color;COLORTERM=truecolor;NO_COLOR=unset"));
+        for (row, symbol, expected) in [
+            (1, "R", palette(1)),
+            (2, "O", palette(208)),
+            (3, "B", [90, 180, 240]),
+        ] {
+            let cell = snapshot
+                .cells
+                .iter()
+                .find(|cell| cell.row == row && cell.text == symbol)
+                .unwrap();
+            assert_eq!(cell.fg, expected);
+        }
     }
 
     #[test]
