@@ -1,7 +1,11 @@
 mod app;
 mod editor;
 mod editor_view;
+mod file_search;
+mod highlight;
 mod layout;
+mod merge;
+mod merge_view;
 mod renderer;
 mod shell;
 mod terminal;
@@ -22,7 +26,7 @@ fn main() -> anyhow::Result<()> {
             "--fresh" => restore = false,
             "--help" | "-h" => {
                 println!(
-                    "LeafTerm — GPU terminal with Git-aware file tree\n\nUsage: leafterm [--fresh] [directory]\n\n--fresh  Start a new layout instead of restoring saved windows\n\n⌘D / ⌘⇧D: Split right / down   ⌘N / ⌘T: New window   ⌘W: Close pane\n⌘⌥Arrows: Focus pane   ⌘⇧Enter: Zoom pane   F2: Rename window\n⌘B: Show / hide sidebar   ⌘E: Toggle Files / Changes   ⌘R: Refresh Git   ⌘C / ⌘V: Copy / paste"
+                    "LeafTerm — GPU terminal with Git-aware file tree\n\nUsage: leafterm [--fresh] [directory]\n\n--fresh  Start a new layout instead of restoring saved windows\n\n⌘D / ⌘⇧D: Split right / down   ⌘N / ⌘T: New window   ⌘W: Close pane\n⌘⌥Arrows: Focus pane   ⌘⇧Enter: Zoom pane   F2: Rename window\n⌘B: Show / hide sidebar   ⌘P: Search files   ⌘E: Toggle Files / Changes   ⌘R: Refresh Git   ⌘C / ⌘V: Copy / paste"
                 );
                 return Ok(());
             }

@@ -6,7 +6,7 @@ use unicode_width::UnicodeWidthStr;
 use crate::{
     editor::Document,
     layout::Bounds,
-    renderer::{Rect, TextRun},
+    renderer::{ColorSpan, Rect, TextRun},
     theme::{BORDER, FG, GREEN, MUTED, SELECTION, SURFACE},
 };
 
@@ -27,11 +27,20 @@ pub fn visual_width(text: &str) -> usize {
     })
 }
 
-fn visible_line(text: &str, start: usize, columns: usize) -> String {
+/// Map document byte colors onto a clipped row without splitting grapheme clusters.
+pub(crate) fn visible_line(
+    text: &str,
+    byte_offset: usize,
+    spans: &[ColorSpan],
+    start: usize,
+    columns: usize,
+) -> (String, Vec<ColorSpan>) {
     let mut result = String::new();
+    let mut colors: Vec<ColorSpan> = Vec::new();
+    let mut span_index = spans.partition_point(|span| span.range.end <= byte_offset);
     let mut col = 0;
     let end = start.saturating_add(columns);
-    for glyph in text.graphemes(true) {
+    for (byte, glyph) in text.grapheme_indices(true) {
         let width = if glyph == "\t" {
             4 - col % 4
         } else {
@@ -39,10 +48,34 @@ fn visible_line(text: &str, start: usize, columns: usize) -> String {
         };
         let next = col + width;
         if next > start && col < end {
+            let displayed_start = result.len();
             if glyph == "\t" || col < start || next > end {
                 result.extend(std::iter::repeat_n(' ', next.min(end) - col.max(start)));
             } else {
                 result.push_str(glyph);
+            }
+            let absolute = byte_offset + byte;
+            while spans
+                .get(span_index)
+                .is_some_and(|span| span.range.end <= absolute)
+            {
+                span_index += 1;
+            }
+            if let Some(span) = spans
+                .get(span_index)
+                .filter(|span| span.range.contains(&absolute))
+            {
+                if let Some(previous) = colors.last_mut()
+                    && previous.range.end == displayed_start
+                    && previous.color == span.color
+                {
+                    previous.range.end = result.len();
+                } else {
+                    colors.push(ColorSpan {
+                        range: displayed_start..result.len(),
+                        color: span.color,
+                    });
+                }
             }
         }
         col = next;
@@ -50,11 +83,12 @@ fn visible_line(text: &str, start: usize, columns: usize) -> String {
             break;
         }
     }
-    result
+    (result, colors)
 }
 
 pub fn paint(
     document: &Document,
+    spans: &[ColorSpan],
     bounds: Bounds,
     offset: usize,
     column: usize,
@@ -136,15 +170,10 @@ pub fn paint(
                     ..bounds
                 },
             ));
-            frame.texts.push(text(
-                text_bounds.x,
-                y,
-                visible_line(line, column, columns),
-                font,
-                cell.1,
-                FG,
-                text_bounds,
-            ));
+            let (visible, colors) = visible_line(line, byte, spans, column, columns);
+            let mut run = text(text_bounds.x, y, visible, font, cell.1, FG, text_bounds);
+            run.colors = colors;
+            frame.texts.push(run);
             if row == cursor_row && (column..=column + columns).contains(&cursor_col) {
                 let x = text_bounds.x + (cursor_col - column) as f32 * cell.0;
                 frame.rects.push(rect(
@@ -191,6 +220,7 @@ fn text(
         font_size,
         line_height,
         color,
+        colors: Vec::new(),
         bold: false,
         italic: false,
         clip: [clip.x, clip.y, clip.x + clip.w, clip.y + clip.h],
@@ -204,7 +234,92 @@ mod tests {
     #[test]
     fn horizontal_clipping_preserves_graphemes_and_tab_columns() {
         assert_eq!(visual_width("a\t中文e\u{301}"), 9);
-        assert_eq!(visible_line("a\t中文e\u{301}", 1, 6), "   中 ");
-        assert_eq!(visible_line("中文e\u{301}", 1, 4), " 文e\u{301}");
+        assert_eq!(visible_line("a\t中文e\u{301}", 0, &[], 1, 6).0, "   中 ");
+        assert_eq!(visible_line("中文e\u{301}", 0, &[], 1, 4).0, " 文e\u{301}");
+    }
+
+    #[test]
+    fn clipped_colors_follow_tabs_unicode_and_absolute_document_offsets() {
+        let spans = [
+            ColorSpan {
+                range: 100..102,
+                color: GREEN,
+            },
+            ColorSpan {
+                range: 102..108,
+                color: MUTED,
+            },
+            ColorSpan {
+                range: 108..111,
+                color: GREEN,
+            },
+        ];
+        let (text, colors) = visible_line("a\t中文e\u{301}", 100, &spans, 1, 8);
+        assert_eq!(text, "   中文e\u{301}");
+        assert_eq!(
+            colors,
+            vec![
+                ColorSpan {
+                    range: 0..3,
+                    color: GREEN
+                },
+                ColorSpan {
+                    range: 3..9,
+                    color: MUTED
+                },
+                ColorSpan {
+                    range: 9..12,
+                    color: GREEN
+                },
+            ]
+        );
+        let (text, colors) = visible_line("a\t中文e\u{301}", 100, &spans, 5, 2);
+        assert_eq!(text, "  ");
+        assert_eq!(
+            colors,
+            vec![ColorSpan {
+                range: 0..2,
+                color: MUTED
+            }]
+        );
+    }
+
+    #[test]
+    fn colors_keep_gaps_and_never_split_combining_clusters() {
+        let spans = [
+            ColorSpan {
+                range: 0..1,
+                color: GREEN,
+            },
+            ColorSpan {
+                range: 1..3,
+                color: MUTED,
+            },
+            ColorSpan {
+                range: 4..5,
+                color: GREEN,
+            },
+        ];
+        let (text, colors) = visible_line("e\u{301} x", 0, &spans, 0, 10);
+        assert_eq!(text, "e\u{301} x");
+        assert_eq!(
+            colors,
+            vec![
+                ColorSpan {
+                    range: 0..3,
+                    color: GREEN
+                },
+                ColorSpan {
+                    range: 4..5,
+                    color: GREEN
+                },
+            ]
+        );
+        assert!(
+            colors
+                .iter()
+                .all(|span| text.is_char_boundary(span.range.start)
+                    && text.is_char_boundary(span.range.end))
+        );
     }
 }

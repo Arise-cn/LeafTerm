@@ -3,7 +3,7 @@
 //! The terminal parser and text shaping run on the CPU; rectangles and cached glyphs are
 //! composited on the GPU. Keeping one font system and atlas avoids duplicating them per pane.
 
-use std::{collections::HashSet, mem, sync::Arc};
+use std::{collections::HashSet, mem, ops::Range, sync::Arc};
 
 use anyhow::{Context, Result};
 use bytemuck::{Pod, Zeroable};
@@ -35,10 +35,18 @@ pub struct TextRun {
     pub font_size: f32,
     pub line_height: f32,
     pub color: [u8; 4],
+    /// Sorted, non-overlapping UTF-8 byte ranges within `text`; gaps use `color`.
+    pub colors: Vec<ColorSpan>,
     pub bold: bool,
     pub italic: bool,
     /// [left, top, right, bottom], in physical pixels.
     pub clip: [f32; 4],
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ColorSpan {
+    pub range: Range<usize>,
+    pub color: [u8; 4],
 }
 
 #[repr(C)]
@@ -51,6 +59,7 @@ struct Vertex {
 struct CachedText {
     buffer: Buffer,
     text: String,
+    colors: Vec<ColorSpan>,
     font_size: f32,
     line_height: f32,
     bold: bool,
@@ -67,6 +76,7 @@ impl CachedText {
         let mut cached = Self {
             buffer,
             text: String::new(),
+            colors: Vec::new(),
             font_size: 0.0,
             line_height: 0.0,
             bold: !run.bold,
@@ -78,6 +88,7 @@ impl CachedText {
 
     fn update(&mut self, fonts: &mut FontSystem, run: &TextRun) {
         if self.text == run.text
+            && self.colors == run.colors
             && self.font_size == run.font_size
             && self.line_height == run.line_height
             && self.bold == run.bold
@@ -103,8 +114,7 @@ impl CachedText {
             } else {
                 Style::Normal
             });
-        self.buffer
-            .set_text(fonts, &run.text, &attrs, Shaping::Advanced);
+        self.set_text(fonts, run, &attrs);
         self.buffer.shape_until_scroll(fonts, false);
         // Many CJK families have no italic face. cosmic-text restricts fallbacks to
         // the requested style, so retry missing italic glyphs with a synthetic slant.
@@ -115,21 +125,70 @@ impl CachedText {
                 .layout_runs()
                 .any(|line| line.glyphs.iter().any(|glyph| glyph.glyph_id == 0))
         {
-            self.buffer.set_text(
+            self.set_text(
                 fonts,
-                &run.text,
+                run,
                 &attrs
                     .style(Style::Normal)
                     .cache_key_flags(CacheKeyFlags::FAKE_ITALIC),
-                Shaping::Advanced,
             );
             self.buffer.shape_until_scroll(fonts, false);
         }
         self.text.clone_from(&run.text);
+        self.colors.clone_from(&run.colors);
+        if self.colors.capacity() > self.colors.len().max(32) * 4 {
+            self.colors.shrink_to(self.colors.len());
+        }
         self.font_size = run.font_size;
         self.line_height = run.line_height;
         self.bold = run.bold;
         self.italic = run.italic;
+    }
+
+    fn set_text(&mut self, fonts: &mut FontSystem, run: &TextRun, attrs: &Attrs<'_>) {
+        if run.colors.is_empty() {
+            self.buffer
+                .set_text(fonts, &run.text, attrs, Shaping::Advanced);
+            return;
+        }
+        // One layout buffer for the whole visible line keeps shaping and glyph
+        // positions intact; color spans do not create additional text buffers.
+        let mut spans = run.colors.iter().peekable();
+        let mut offset = 0;
+        let segments = std::iter::from_fn(|| {
+            while let Some(span) = spans.peek() {
+                let range = &span.range;
+                if range.start < offset
+                    || range.start >= range.end
+                    || range.end > run.text.len()
+                    || !run.text.is_char_boundary(range.start)
+                    || !run.text.is_char_boundary(range.end)
+                {
+                    spans.next();
+                    continue;
+                }
+                if offset < range.start {
+                    let gap = &run.text[offset..range.start];
+                    offset = range.start;
+                    return Some((gap, attrs.clone()));
+                }
+                let span = spans.next().unwrap();
+                offset = span.range.end;
+                let [r, g, b, a] = span.color;
+                return Some((
+                    &run.text[span.range.clone()],
+                    attrs.clone().color(Color::rgba(r, g, b, a)),
+                ));
+            }
+            if offset < run.text.len() {
+                let tail = &run.text[offset..];
+                offset = run.text.len();
+                return Some((tail, attrs.clone()));
+            }
+            None
+        });
+        self.buffer
+            .set_rich_text(fonts, segments, attrs, Shaping::Advanced, None);
     }
 }
 
@@ -552,6 +611,125 @@ struct VertexOutput {
 mod tests {
     use super::*;
 
+    fn text_run(text: &str) -> TextRun {
+        TextRun {
+            x: 0.0,
+            y: 0.0,
+            text: text.into(),
+            font_size: 26.0,
+            line_height: 38.0,
+            color: [255; 4],
+            colors: Vec::new(),
+            bold: false,
+            italic: false,
+            clip: [0.0, 0.0, 500.0, 38.0],
+        }
+    }
+
+    #[test]
+    fn colored_unicode_spans_preserve_one_line_and_glyph_positions() {
+        let mut fonts = FontSystem::new();
+        fonts.db_mut().set_monospace_family("Menlo");
+        let mut run = text_run("A 中文 e\u{301} z");
+        let mut cached = CachedText::new(&mut fonts, &run);
+        let plain: Vec<_> = cached
+            .buffer
+            .layout_runs()
+            .flat_map(|line| line.glyphs.iter().cloned())
+            .collect();
+        let green = [110, 220, 170, 255];
+        let blue = [130, 185, 235, 255];
+        let chinese = run.text.find("中文").unwrap();
+        let combining = run.text.find('e').unwrap();
+        run.colors = vec![
+            ColorSpan {
+                range: chinese..chinese + "中文".len(),
+                color: green,
+            },
+            ColorSpan {
+                range: combining..combining + "e\u{301}".len(),
+                color: blue,
+            },
+        ];
+        cached.update(&mut fonts, &run);
+        assert_eq!(cached.buffer.lines.len(), 1);
+        let colored: Vec<_> = cached
+            .buffer
+            .layout_runs()
+            .flat_map(|line| line.glyphs)
+            .collect();
+        assert_eq!(plain.len(), colored.len());
+        for (before, after) in plain.iter().zip(&colored) {
+            assert_eq!((before.start, before.end), (after.start, after.end));
+            assert_eq!(before.glyph_id, after.glyph_id);
+            assert_eq!(before.font_id, after.font_id);
+            assert!((before.x - after.x).abs() < 0.001);
+            assert!((before.w - after.w).abs() < 0.001);
+            let expected = if (chinese..chinese + "中文".len()).contains(&after.start) {
+                Some(Color::rgba(green[0], green[1], green[2], green[3]))
+            } else if (combining..combining + "e\u{301}".len()).contains(&after.start) {
+                Some(Color::rgba(blue[0], blue[1], blue[2], blue[3]))
+            } else {
+                None
+            };
+            assert_eq!(after.color_opt, expected);
+        }
+    }
+
+    #[test]
+    fn color_updates_invalidate_cached_styles_and_plain_text_clears_them() {
+        let mut fonts = FontSystem::new();
+        fonts.db_mut().set_monospace_family("Menlo");
+        let mut run = text_run("let value = 1;");
+        run.colors.push(ColorSpan {
+            range: 0..3,
+            color: [100, 200, 100, 255],
+        });
+        let mut cached = CachedText::new(&mut fonts, &run);
+        cached.buffer.set_redraw(false);
+        cached.update(&mut fonts, &run);
+        assert!(
+            !cached.buffer.redraw(),
+            "unchanged lines should reuse shaping"
+        );
+        run.colors[0].color = [200, 100, 100, 255];
+        cached.update(&mut fonts, &run);
+        assert_eq!(
+            cached.buffer.layout_runs().next().unwrap().glyphs[0].color_opt,
+            Some(Color::rgba(200, 100, 100, 255))
+        );
+        run.colors.clear();
+        cached.update(&mut fonts, &run);
+        assert!(
+            cached
+                .buffer
+                .layout_runs()
+                .flat_map(|line| line.glyphs)
+                .all(|glyph| glyph.color_opt.is_none())
+        );
+        // Stale/invalid byte ranges must never split UTF-8 or drop source text.
+        run.text = "中文 code".into();
+        run.colors = vec![
+            ColorSpan {
+                range: 1..2,
+                color: [255; 4],
+            },
+            ColorSpan {
+                range: 0..100,
+                color: [255; 4],
+            },
+        ];
+        cached.update(&mut fonts, &run);
+        assert_eq!(cached.buffer.lines[0].text(), run.text);
+        assert!(
+            cached
+                .buffer
+                .layout_runs()
+                .flat_map(|line| line.glyphs)
+                .all(|glyph| glyph.color_opt.is_none())
+        );
+    }
+
     #[test]
     fn chinese_remains_available_when_ansi_style_changes() {
         let mut fonts = FontSystem::new();
@@ -563,6 +741,7 @@ mod tests {
             font_size: 26.0,
             line_height: 38.0,
             color: [255; 4],
+            colors: Vec::new(),
             bold: false,
             italic: false,
             clip: [0.0, 0.0, 200.0, 38.0],

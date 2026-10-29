@@ -82,6 +82,7 @@ impl DiskVersion {
 pub struct Document {
     path: PathBuf,
     state: EditState,
+    revision: u64,
     baseline: DiskVersion,
     bom: bool,
     crlf: bool,
@@ -136,6 +137,7 @@ impl Document {
                 cursor: 0,
                 anchor: None,
             },
+            revision: 0,
             baseline,
             bom,
             crlf,
@@ -150,9 +152,19 @@ impl Document {
         &self.state.text
     }
 
+    /// Changes only when contents change, so cursor movement never schedules parsing.
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
+
     pub fn is_dirty(&self) -> bool {
         let offset = if self.bom { BOM.len() } else { 0 };
         self.recovery_review || self.text().as_bytes() != &self.baseline.bytes[offset..]
+    }
+
+    /// Exact saved contents, including a BOM, only while no edits are pending.
+    pub fn saved_bytes(&self) -> Option<Vec<u8>> {
+        (!self.is_dirty()).then(|| self.baseline.bytes.to_vec())
     }
 
     /// Zero-based line and display column. Tabs use four-column stops.
@@ -195,6 +207,40 @@ impl Document {
             return Ok(());
         }
         self.replace(range, &text);
+        Ok(())
+    }
+
+    /// Apply one undoable edit using byte ranges from this document revision.
+    /// Unlike typed input, the replacement keeps its original line endings.
+    pub fn replace_range(&mut self, range: Range<usize>, replacement: &str) -> Result<()> {
+        ensure!(
+            range.start <= range.end && range.end <= self.text().len(),
+            "Replacement range is outside the document."
+        );
+        ensure!(
+            [range.start, range.end].into_iter().all(|boundary| {
+                boundary == self.text().len()
+                    || self
+                        .text()
+                        .grapheme_indices(true)
+                        .any(|(i, _)| i == boundary)
+            }),
+            "Replacement must start and end at complete text characters."
+        );
+        ensure!(
+            !replacement.contains('\0'),
+            "Text cannot contain NUL bytes."
+        );
+        let bytes = (self.text().len() - range.len())
+            .saturating_add(replacement.len())
+            .saturating_add(if self.bom { BOM.len() } else { 0 });
+        ensure!(
+            bytes <= MAX_BYTES,
+            "Editing is limited to 256 KiB per file."
+        );
+        if &self.text()[range.clone()] != replacement {
+            self.replace(range, replacement);
+        }
         Ok(())
     }
 
@@ -262,6 +308,9 @@ impl Document {
 
     pub fn undo(&mut self) {
         if let Some(previous) = self.undo.pop_back() {
+            if self.state.text != previous.text {
+                self.revision = self.revision.wrapping_add(1);
+            }
             self.redo
                 .push_back(std::mem::replace(&mut self.state, previous));
             self.preferred_column = None;
@@ -271,6 +320,9 @@ impl Document {
 
     pub fn redo(&mut self) {
         if let Some(next) = self.redo.pop_back() {
+            if self.state.text != next.text {
+                self.revision = self.revision.wrapping_add(1);
+            }
             self.undo
                 .push_back(std::mem::replace(&mut self.state, next));
             self.preferred_column = None;
@@ -346,6 +398,7 @@ impl Document {
                 cursor: draft.cursor,
                 anchor: None,
             },
+            revision: 0,
             baseline,
             bom: draft.bom,
             crlf: draft.crlf,
@@ -357,6 +410,9 @@ impl Document {
     }
 
     fn replace(&mut self, range: Range<usize>, text: &str) {
+        if &self.text()[range.clone()] != text {
+            self.revision = self.revision.wrapping_add(1);
+        }
         self.undo.push_back(self.state.clone());
         self.redo.clear();
         self.trim_history();
@@ -559,6 +615,109 @@ mod tests {
         fs::write(&path, text).unwrap();
         let doc = Document::open(&path).unwrap();
         (dir, path, doc)
+    }
+
+    #[test]
+    fn content_revisions_ignore_selection_save_and_no_ops_but_track_undo() {
+        let (_dir, _path, mut doc) = document("中文\n".as_bytes());
+        assert_eq!(doc.revision(), 0);
+        doc.move_cursor(Movement::End, true);
+        doc.set_cursor(0, 0, false);
+        doc.backspace();
+        doc.insert("").unwrap();
+        doc.undo();
+        assert_eq!(doc.revision(), 0);
+        doc.select_all();
+        doc.insert("中文\n").unwrap();
+        assert_eq!(doc.revision(), 0);
+        doc.insert("new").unwrap();
+        assert_eq!(doc.revision(), 1);
+        doc.undo();
+        assert_eq!(doc.revision(), 2);
+        doc.redo();
+        assert_eq!(doc.revision(), 3);
+        doc.accept_save(doc.save_request().save().unwrap());
+        assert_eq!(doc.revision(), 3);
+        let mut restored = Document::recover(doc.recovery_draft()).unwrap();
+        assert_eq!(restored.revision(), 0);
+        restored.insert("x").unwrap();
+        assert_eq!(restored.revision(), 1);
+    }
+
+    #[test]
+    fn range_replacement_is_one_undo_step_preserving_bom_and_original_line_endings() {
+        let original = "前言\n<<<<<<< HEAD\r\n当前\r\n=======\r\n传入\r\n>>>>>>> topic\r\n结束\n";
+        let mut bytes = BOM.to_vec();
+        bytes.extend_from_slice(original.as_bytes());
+        let (_dir, path, mut doc) = document(&bytes);
+        assert_eq!(doc.saved_bytes(), Some(bytes.clone()));
+        doc.set_cursor(0, 2, false);
+        doc.move_cursor(Movement::Right, true);
+        let selection = doc.selection_range();
+        let cursor = doc.cursor_position();
+        let range = original.find("<<<<<<<").unwrap()..original.find("结束").unwrap();
+        doc.replace_range(range, "当前\r\n传入\r\n").unwrap();
+        assert_eq!(doc.text(), "前言\n当前\r\n传入\r\n结束\n");
+        assert!(doc.saved_bytes().is_none());
+        doc.undo();
+        assert_eq!(doc.text(), original);
+        assert_eq!(doc.selection_range(), selection);
+        assert_eq!(doc.cursor_position(), cursor);
+        assert_eq!(doc.saved_bytes(), Some(bytes));
+        doc.redo();
+        let expected = b"\xef\xbb\xbf"
+            .iter()
+            .copied()
+            .chain(doc.text().bytes())
+            .collect::<Vec<_>>();
+        doc.accept_save(doc.save_request().save().unwrap());
+        assert_eq!(fs::read(path).unwrap(), expected);
+        assert_eq!(doc.saved_bytes(), Some(expected));
+    }
+
+    #[test]
+    fn range_replacement_rejects_invalid_utf8_grapheme_and_crlf_boundaries_without_changes() {
+        let original = "中e\u{301}👩‍💻\r\n末";
+        let (_dir, _path, mut doc) = document(original.as_bytes());
+        let emoji = original.find('👩').unwrap();
+        let newline = original.find('\n').unwrap();
+        for range in [
+            0..1,
+            1..3,
+            3..4,
+            emoji..emoji + '👩'.len_utf8(),
+            newline..newline + 1,
+            Range { start: 4, end: 3 },
+            0..usize::MAX,
+        ] {
+            assert!(doc.replace_range(range, "x").is_err());
+            assert_eq!(doc.text(), original);
+        }
+        assert!(doc.replace_range(0..0, "\0").is_err());
+        assert!(doc.replace_range(0..0, &"x".repeat(MAX_BYTES)).is_err());
+        assert!(doc.undo.is_empty());
+        assert!(!doc.is_dirty());
+        doc.replace_range(0..0, "").unwrap();
+        doc.replace_range(0..doc.text().len(), original).unwrap();
+        assert!(doc.undo.is_empty(), "no-op edits must not consume history");
+    }
+
+    #[test]
+    fn range_replacement_includes_bom_in_size_limit_and_keeps_inserted_cluster_cursor_safe() {
+        let (_dir, _path, mut doc) = document(b"\xef\xbb\xbfa");
+        let full = "x".repeat(MAX_BYTES - BOM.len());
+        doc.replace_range(0..1, &full).unwrap();
+        let end = doc.text().len();
+        assert!(doc.replace_range(end..end, "x").is_err());
+        assert_eq!(doc.save_request().bytes.len(), MAX_BYTES);
+        doc.undo();
+        assert_eq!(doc.text(), "a");
+        assert!(!doc.is_dirty());
+        doc.replace_range(1..1, "\u{301}").unwrap();
+        assert_eq!(doc.text(), "a\u{301}");
+        assert_eq!(doc.state.cursor, doc.text().len());
+        doc.backspace();
+        assert_eq!(doc.text(), "");
     }
 
     #[test]

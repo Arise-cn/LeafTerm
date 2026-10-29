@@ -6,6 +6,7 @@ use std::{
 };
 
 use anyhow::Result;
+use unicode_segmentation::UnicodeSegmentation;
 use winit::{
     dpi::{LogicalPosition, LogicalSize},
     event::{ElementState, Ime, MouseButton, MouseScrollDelta, WindowEvent},
@@ -17,7 +18,11 @@ use winit::{
 use crate::{
     editor::{Document, Movement, RecoveryDraft, SaveRequest, SavedFile},
     editor_view,
+    file_search::{FileSearch, SearchWorker},
+    highlight::{HighlightWorker, Highlights},
     layout::{Axis, Bounds, Divider, Layout},
+    merge::{self, Conflict},
+    merge_view::{self, MergeAction},
     renderer::{Rect, Renderer, TextRun},
     terminal::TerminalSession,
     theme::{AMBER, BG, BORDER, FG, GREEN, MUTED, PANEL, RED, SURFACE},
@@ -30,6 +35,10 @@ const FOOT: f32 = 0.0;
 
 pub enum Event {
     Wake,
+    Highlighted {
+        token: u64,
+        result: Highlights,
+    },
     Workspace {
         cwd: PathBuf,
         hidden: bool,
@@ -49,9 +58,23 @@ pub enum Event {
         token: u64,
         result: Result<SavedFile, String>,
     },
+    FileSearch {
+        token: u64,
+        result: Result<workspace::FileSearchResult, String>,
+    },
+    ConflictStaged {
+        token: u64,
+        result: Result<(), String>,
+    },
 }
 
 enum Job {
+    StageResolved {
+        root: PathBuf,
+        relative: PathBuf,
+        expected: Vec<u8>,
+        token: u64,
+    },
     Refresh {
         cwd: PathBuf,
         directories: Vec<PathBuf>,
@@ -77,6 +100,7 @@ enum Job {
 
 pub struct LoadedPreview {
     recovered: bool,
+    conflict_root: Option<PathBuf>,
     text: String,
     document: Option<Document>,
     notice: String,
@@ -85,6 +109,10 @@ pub struct LoadedPreview {
 #[derive(Clone)]
 enum PreviewSource {
     File(PathBuf),
+    Conflict {
+        root: PathBuf,
+        path: PathBuf,
+    },
     Diff {
         root: PathBuf,
         change: FileChange,
@@ -95,16 +123,20 @@ enum PreviewSource {
 impl PreviewSource {
     fn path(&self) -> &Path {
         match self {
-            Self::File(path) => path,
+            Self::File(path) | Self::Conflict { path, .. } => path,
             Self::Diff { change, .. } => &change.path,
         }
     }
 
     fn load(&self) -> Result<LoadedPreview> {
+        if let Self::Conflict { root, path } = self {
+            workspace::validate_text_conflict(root, path.strip_prefix(root)?)?;
+        }
         match self {
-            Self::File(path) => match Document::open(path) {
+            Self::File(path) | Self::Conflict { path, .. } => match Document::open(path) {
                 Ok(document) => Ok(LoadedPreview {
                     recovered: false,
+                    conflict_root: None,
                     text: String::new(),
                     document: Some(document),
                     notice: String::new(),
@@ -113,6 +145,7 @@ impl PreviewSource {
                     let content = workspace::load_file(path)?;
                     Ok(LoadedPreview {
                         recovered: false,
+                        conflict_root: None,
                         text: content.text,
                         document: None,
                         notice: format!("Read only · {error}"),
@@ -123,6 +156,7 @@ impl PreviewSource {
                 let content = workspace::load_diff(root, change, *kind)?;
                 Ok(LoadedPreview {
                     recovered: false,
+                    conflict_root: None,
                     text: content.text,
                     document: None,
                     notice: String::new(),
@@ -142,6 +176,41 @@ struct Preview {
     document: Option<Document>,
     saving: bool,
     notice: String,
+    merge: Option<MergeState>,
+    highlight_revision: Option<u64>,
+    highlight_token: u64,
+    highlights: Highlights,
+}
+
+#[derive(Default)]
+struct MergeState {
+    conflicts: Vec<Conflict>,
+    selected: usize,
+    offset: usize,
+    column: usize,
+    error: Option<String>,
+    staging: bool,
+    staged: bool,
+}
+
+impl MergeState {
+    fn refresh(&mut self, text: &str) {
+        match merge::parse(text) {
+            Ok(conflicts) => {
+                self.conflicts = conflicts;
+                self.error = None;
+            }
+            Err(error) => {
+                self.conflicts.clear();
+                self.error = Some(error);
+            }
+        }
+        self.selected = self.selected.min(self.conflicts.len().saturating_sub(1));
+    }
+
+    fn unresolved(&self) -> bool {
+        self.error.is_some() || !self.conflicts.is_empty()
+    }
 }
 
 impl Preview {
@@ -196,11 +265,16 @@ enum Action {
     Directory(PathBuf),
     File(PathBuf),
     Diff(FileChange, DiffKind),
+    Conflict(PathBuf),
+    Merge(MergeAction),
+    StageResolved,
     Refresh,
     Hidden,
     Pin,
     ClosePreview,
     SaveFile,
+    FocusFileSearch,
+    ClearFileSearch,
     PromptChoice(u8),
     PromptConfirm(bool),
     DiffKind(DiffKind),
@@ -214,6 +288,7 @@ struct Scene {
     panes: Vec<(u64, Bounds)>,
     dividers: Vec<Divider>,
     editor: Option<Bounds>,
+    comparison: Option<Bounds>,
 }
 
 impl Scene {
@@ -245,6 +320,7 @@ impl Scene {
             font_size: size,
             line_height: size * 1.4,
             color,
+            colors: Vec::new(),
             bold: false,
             italic: false,
             clip: [clip.x, clip.y, clip.x + clip.w, clip.y + clip.h],
@@ -293,6 +369,9 @@ pub struct App {
     sidebar_visible: bool,
     changes_view: bool,
     show_hidden: bool,
+    file_search: FileSearch,
+    search_worker: Option<SearchWorker>,
+    highlight_worker: Option<HighlightWorker>,
     workspace: Option<WorkspaceSnapshot>,
     directories: HashMap<PathBuf, DirectoryListing>,
     expanded: HashSet<PathBuf>,
@@ -325,6 +404,16 @@ impl App {
             .spawn(move || {
                 while let Ok(job) = rx.recv() {
                     let event = match job {
+                        Job::StageResolved {
+                            root,
+                            relative,
+                            expected,
+                            token,
+                        } => Event::ConflictStaged {
+                            token,
+                            result: workspace::stage_resolved(&root, &relative, &expected)
+                                .map_err(|error| error.to_string()),
+                        },
                         Job::Refresh {
                             cwd,
                             directories,
@@ -372,14 +461,30 @@ impl App {
                         },
                         Job::Recover { draft, token } => Event::Preview {
                             token,
-                            result: Document::recover(draft)
-                                .map(|document| LoadedPreview {
-                                    recovered: true,
-                                    text: String::new(),
-                                    document: Some(document),
-                                    notice: "Recovered unsaved edits · ⌘S to save".into(),
-                                })
-                                .map_err(|e| e.to_string()),
+                            result: {
+                                let conflict_root = workspace::load_workspace(&draft.path)
+                                    .ok()
+                                    .and_then(|workspace| {
+                                        workspace
+                                            .changes
+                                            .iter()
+                                            .any(|change| {
+                                                change.is_conflicted()
+                                                    && workspace.root.join(&change.path)
+                                                        == draft.path
+                                            })
+                                            .then_some(workspace.root)
+                                    });
+                                Document::recover(draft)
+                                    .map(|document| LoadedPreview {
+                                        recovered: true,
+                                        conflict_root,
+                                        text: String::new(),
+                                        document: Some(document),
+                                        notice: "Recovered unsaved edits · ⌘S to save".into(),
+                                    })
+                                    .map_err(|e| e.to_string())
+                            },
                         },
                     };
                     if events.send_event(event).is_err() {
@@ -415,6 +520,9 @@ impl App {
             sidebar_visible: true,
             changes_view: true,
             show_hidden: false,
+            file_search: FileSearch::default(),
+            search_worker: None,
+            highlight_worker: None,
             workspace: None,
             directories: HashMap::new(),
             expanded: HashSet::new(),
@@ -570,10 +678,29 @@ impl App {
         let Some(root) = self.workspace.as_ref().map(|w| w.root.clone()) else {
             return;
         };
-        self.show_preview(PreviewSource::Diff { root, change, kind });
+        if change.is_conflicted() {
+            self.show_preview(PreviewSource::Conflict {
+                path: root.join(&change.path),
+                root,
+            });
+        } else {
+            self.show_preview(PreviewSource::Diff { root, change, kind });
+        }
     }
 
-    fn show_preview(&mut self, source: PreviewSource) {
+    fn show_preview(&mut self, mut source: PreviewSource) {
+        if let PreviewSource::File(path) = &source
+            && let Some(workspace) = &self.workspace
+            && workspace
+                .changes
+                .iter()
+                .any(|change| change.is_conflicted() && workspace.root.join(&change.path) == *path)
+        {
+            source = PreviewSource::Conflict {
+                root: workspace.root.clone(),
+                path: path.clone(),
+            };
+        }
         self.request_leave(PendingAction::Open(source));
     }
 
@@ -591,6 +718,7 @@ impl App {
             self.notify("Workspace is busy. Try again in a moment.");
             return;
         }
+        let merge = matches!(&source, PreviewSource::Conflict { .. }).then(MergeState::default);
         self.preview = Some(Preview {
             source,
             token,
@@ -601,6 +729,10 @@ impl App {
             document: None,
             saving: false,
             notice: String::new(),
+            merge,
+            highlight_revision: None,
+            highlight_token: 0,
+            highlights: Highlights::default(),
         });
         self.draft_revision += 1;
         self.preedit.clear();
@@ -634,10 +766,11 @@ impl App {
 
     pub fn has_unsaved_file(&self) -> bool {
         self.recovery_pending.is_some()
-            || self
-                .preview
-                .as_ref()
-                .is_some_and(|p| p.document.as_ref().is_some_and(Document::is_dirty) || p.saving)
+            || self.preview.as_ref().is_some_and(|p| {
+                p.document.as_ref().is_some_and(Document::is_dirty)
+                    || p.saving
+                    || p.merge.as_ref().is_some_and(|merge| merge.staging)
+            })
     }
 
     pub fn draft_revision(&self) -> u64 {
@@ -677,6 +810,10 @@ impl App {
             document: None,
             saving: false,
             notice: String::new(),
+            merge: None,
+            highlight_revision: None,
+            highlight_token: 0,
+            highlights: Highlights::default(),
         });
         if self.worker.try_send(Job::Recover { draft, token }).is_err()
             && let Some(preview) = &mut self.preview
@@ -695,6 +832,15 @@ impl App {
     }
 
     fn request_leave(&mut self, pending: PendingAction) {
+        if self
+            .preview
+            .as_ref()
+            .and_then(|preview| preview.merge.as_ref())
+            .is_some_and(|merge| merge.staging)
+        {
+            self.notify("Wait for marking this file resolved to finish.");
+            return;
+        }
         if self.has_unsaved_file() {
             self.prompt = Some(Prompt::SaveChanges(pending));
         } else {
@@ -727,9 +873,11 @@ impl App {
         match choice {
             1 => self.save_file(Some(pending)),
             2 => {
-                if self.preview.as_ref().is_some_and(|p| p.saving) {
+                if self.preview.as_ref().is_some_and(|p| {
+                    p.saving || p.merge.as_ref().is_some_and(|merge| merge.staging)
+                }) {
                     self.prompt = Some(Prompt::SaveChanges(pending));
-                    self.notify("Wait for the current save to finish.");
+                    self.notify("Wait for saving or marking this file resolved to finish.");
                     return;
                 }
                 self.preview = None;
@@ -746,6 +894,16 @@ impl App {
         let Some(preview) = &mut self.preview else {
             return;
         };
+        if let Some(merge) = &preview.merge {
+            if merge.unresolved() {
+                self.notify("Resolve all conflict blocks before saving. Undo is available; your draft is retained.");
+                return;
+            }
+            if merge.staging {
+                self.notify("Wait for marking this file resolved to finish.");
+                return;
+            }
+        }
         let Some(document) = &preview.document else {
             self.notify("This file is read only. The recovery draft, if any, is still preserved.");
             return;
@@ -781,6 +939,12 @@ impl App {
         if let Some(preview) = &mut self.preview {
             preview.notice.clear();
             if let Some(document) = &preview.document {
+                if let Some(merge) = &mut preview.merge {
+                    merge.refresh(document.text());
+                    if document.is_dirty() {
+                        merge.staged = false;
+                    }
+                }
                 let (row, col) = document.cursor_position();
                 let bounds = self.scene.editor.unwrap_or_default();
                 let rows = (bounds.h / self.cell.1).floor().max(1.0) as usize;
@@ -798,6 +962,146 @@ impl App {
                     preview.column = col + 1 - columns;
                 }
             }
+        }
+        self.update_highlighting();
+        self.redraw();
+    }
+
+    fn update_highlighting(&mut self) {
+        let Some(preview) = &mut self.preview else {
+            if let Some(worker) = self.highlight_worker.take() {
+                worker.clear();
+            }
+            return;
+        };
+        let Some(document) = &preview.document else {
+            if let Some(worker) = self.highlight_worker.take() {
+                worker.clear();
+            }
+            return;
+        };
+        if preview.highlight_revision == Some(document.revision()) {
+            return;
+        }
+        preview.highlight_revision = Some(document.revision());
+        preview.highlights = Highlights::default();
+        if self.highlight_worker.is_none() {
+            match HighlightWorker::new(self.proxy.clone()) {
+                Ok(worker) => self.highlight_worker = Some(worker),
+                Err(error) => {
+                    self.notify(format!("Syntax highlighting unavailable: {error}"));
+                    return;
+                }
+            }
+        }
+        preview.highlight_token = self
+            .highlight_worker
+            .as_ref()
+            .unwrap()
+            .submit(preview.source.path().to_owned(), document.text().to_owned());
+    }
+
+    fn sync_conflict_preview(&mut self) {
+        let Some(preview) = &mut self.preview else {
+            return;
+        };
+        if let PreviewSource::File(path) = &preview.source
+            && let Some(workspace) = &self.workspace
+            && workspace
+                .changes
+                .iter()
+                .any(|change| change.is_conflicted() && workspace.root.join(&change.path) == *path)
+        {
+            preview.source = PreviewSource::Conflict {
+                root: workspace.root.clone(),
+                path: path.clone(),
+            };
+        }
+        if matches!(preview.source, PreviewSource::Conflict { .. })
+            && let Some(document) = &preview.document
+        {
+            preview
+                .merge
+                .get_or_insert_with(MergeState::default)
+                .refresh(document.text());
+        }
+    }
+
+    fn merge_action(&mut self, action: MergeAction) {
+        let Some(preview) = &mut self.preview else {
+            return;
+        };
+        let (Some(merge), Some(document)) = (&mut preview.merge, &mut preview.document) else {
+            return;
+        };
+        if merge.conflicts.is_empty() || merge.error.is_some() {
+            return;
+        }
+        match action {
+            MergeAction::Previous | MergeAction::Next => {
+                let count = merge.conflicts.len();
+                merge.selected = (merge.selected
+                    + if matches!(action, MergeAction::Previous) {
+                        count - 1
+                    } else {
+                        1
+                    })
+                    % count;
+                let row = merge.conflicts[merge.selected].start_line;
+                document.set_cursor(row, 0, false);
+                preview.offset = row.saturating_sub(2);
+            }
+            MergeAction::Accept(choice) => {
+                let conflict = &merge.conflicts[merge.selected];
+                let replacement = conflict.replacement(document.text(), choice);
+                let range = conflict.range.clone();
+                if let Err(error) = document.replace_range(range, &replacement) {
+                    self.notify(error.to_string());
+                    return;
+                }
+            }
+        }
+        merge.offset = 0;
+        merge.column = 0;
+        preview.column = 0;
+        self.editor_changed();
+    }
+
+    fn stage_resolved(&mut self) {
+        let Some(preview) = &mut self.preview else {
+            return;
+        };
+        let PreviewSource::Conflict { root, path } = &preview.source else {
+            return;
+        };
+        let (Some(merge), Some(document)) = (&mut preview.merge, &preview.document) else {
+            return;
+        };
+        if merge.staging || merge.staged {
+            return;
+        }
+        if merge.unresolved() {
+            self.notify("Resolve all conflict blocks before marking this file resolved.");
+            return;
+        }
+        let Some(expected) = document.saved_bytes().filter(|_| !preview.saving) else {
+            self.notify("Save the result with ⌘S before marking this file resolved.");
+            return;
+        };
+        let Ok(relative) = path.strip_prefix(root) else {
+            return;
+        };
+        let job = Job::StageResolved {
+            root: root.clone(),
+            relative: relative.to_owned(),
+            expected,
+            token: preview.token,
+        };
+        if self.worker.try_send(job).is_ok() {
+            merge.staging = true;
+            preview.notice = "Marking resolved…".into();
+        } else {
+            self.notify("Workspace is busy. Try marking this file resolved again shortly.");
         }
         self.redraw();
     }
@@ -951,6 +1255,9 @@ impl App {
 
     fn toggle_sidebar(&mut self) {
         self.sidebar_visible = !self.sidebar_visible;
+        if !self.sidebar_visible {
+            self.blur_file_search();
+        }
         self.dragging = None;
         self.selection = None;
         if self.sidebar_visible {
@@ -962,6 +1269,183 @@ impl App {
 
     fn save(&self) {
         self.proxy.save();
+    }
+
+    fn blur_file_search(&mut self) {
+        if self.file_search.focused {
+            self.file_search.focused = false;
+            self.preedit.clear();
+            self.redraw();
+        }
+    }
+
+    fn focus_file_search(&mut self) {
+        self.sidebar_visible = true;
+        self.changes_view = false;
+        self.file_search.focused = true;
+        self.file_search.select_all = !self.file_search.query.is_empty();
+        self.file_search.cursor = self.file_search.query.len();
+        self.preedit.clear();
+        self.selection = None;
+        self.editor_dragging = false;
+        self.refresh(true);
+        self.save();
+        self.redraw();
+    }
+
+    fn search_files(&mut self) {
+        self.file_search.paths.clear();
+        self.file_search.error = None;
+        self.file_search.truncated = false;
+        self.file_search.selected = 0;
+        self.sidebar_scroll = 0.0;
+        self.file_search.busy = !self.file_search.query.trim().is_empty();
+        if self.search_worker.is_none() && self.file_search.busy {
+            match SearchWorker::new(self.proxy.clone()) {
+                Ok(worker) => self.search_worker = Some(worker),
+                Err(error) => {
+                    self.file_search.error = Some(format!("Cannot start search: {error}"));
+                    self.file_search.busy = false;
+                }
+            }
+        }
+        if let Some(worker) = &self.search_worker {
+            let root = self
+                .workspace
+                .as_ref()
+                .map(|w| w.root.clone())
+                .unwrap_or_else(|| self.workspace_cwd.clone());
+            self.file_search.token =
+                worker.submit(root, self.file_search.query.clone(), self.show_hidden);
+        }
+        self.redraw();
+    }
+
+    fn file_search_key(&mut self, key: &Key, text: Option<&str>) -> bool {
+        if !self.file_search.focused {
+            return false;
+        }
+        let changed = if self.modifiers.super_key() {
+            match key {
+                Key::Character(ch) if ch.eq_ignore_ascii_case("a") => {
+                    self.file_search.select_all = true;
+                    false
+                }
+                Key::Character(ch) if ch.eq_ignore_ascii_case("v") => {
+                    let text = self.clipboard.as_mut().and_then(|c| c.get_text().ok());
+                    text.is_some_and(|text| self.file_search.insert(&text))
+                }
+                Key::Character(ch) if ch.eq_ignore_ascii_case("c") => {
+                    if self.file_search.select_all
+                        && let Some(clipboard) = &mut self.clipboard
+                    {
+                        let _ = clipboard.set_text(self.file_search.query.clone());
+                    }
+                    false
+                }
+                Key::Character(ch) if ch.eq_ignore_ascii_case("x") => {
+                    if self.file_search.select_all
+                        && self.clipboard.as_mut().is_some_and(|clipboard| {
+                            clipboard.set_text(self.file_search.query.clone()).is_ok()
+                        })
+                    {
+                        self.file_search.backspace()
+                    } else {
+                        false
+                    }
+                }
+                Key::Named(NamedKey::ArrowLeft | NamedKey::ArrowRight) => {
+                    self.file_search.cursor = if *key == Key::Named(NamedKey::ArrowLeft) {
+                        0
+                    } else {
+                        self.file_search.query.len()
+                    };
+                    self.file_search.select_all = false;
+                    false
+                }
+                _ => return false,
+            }
+        } else if !self.preedit.is_empty() {
+            return true;
+        } else {
+            match key {
+                Key::Named(NamedKey::Escape) => {
+                    self.file_search.clear();
+                    self.search_files();
+                    self.blur_file_search();
+                    false
+                }
+                Key::Named(NamedKey::Enter) => {
+                    if let Some(path) = self
+                        .file_search
+                        .paths
+                        .get(self.file_search.selected)
+                        .cloned()
+                    {
+                        let root = self
+                            .workspace
+                            .as_ref()
+                            .map(|w| w.root.clone())
+                            .unwrap_or_else(|| self.workspace_cwd.clone());
+                        self.blur_file_search();
+                        self.show_preview(PreviewSource::File(root.join(path)));
+                    }
+                    false
+                }
+                Key::Named(NamedKey::ArrowUp | NamedKey::ArrowDown) => {
+                    if *key == Key::Named(NamedKey::ArrowUp) {
+                        self.file_search.selected = self.file_search.selected.saturating_sub(1);
+                    } else {
+                        self.file_search.selected = (self.file_search.selected + 1)
+                            .min(self.file_search.paths.len().saturating_sub(1));
+                    }
+                    let top = self.file_search.selected as f32 * 44.0;
+                    let height = self
+                        .window
+                        .as_ref()
+                        .map(|window| {
+                            window.inner_size().height as f32 / window.scale_factor() as f32
+                        })
+                        .unwrap_or(840.0)
+                        - 278.0;
+                    self.sidebar_scroll = self
+                        .sidebar_scroll
+                        .min(top)
+                        .max((top + 44.0 - height).max(0.0));
+                    false
+                }
+                Key::Named(NamedKey::ArrowLeft | NamedKey::ArrowRight) => {
+                    self.file_search
+                        .move_cursor(*key == Key::Named(NamedKey::ArrowRight));
+                    false
+                }
+                Key::Named(NamedKey::Home | NamedKey::End) => {
+                    self.file_search.cursor = if *key == Key::Named(NamedKey::Home) {
+                        0
+                    } else {
+                        self.file_search.query.len()
+                    };
+                    self.file_search.select_all = false;
+                    false
+                }
+                Key::Named(NamedKey::Backspace) => self.file_search.backspace(),
+                Key::Named(NamedKey::Delete) => self.file_search.delete(),
+                Key::Named(NamedKey::Space) => self.file_search.insert(" "),
+                Key::Named(NamedKey::Tab) => {
+                    self.blur_file_search();
+                    false
+                }
+                _ if !self.modifiers.control_key() && !self.modifiers.alt_key() => {
+                    text.is_some_and(|text| self.file_search.insert(text))
+                }
+                _ => false,
+            }
+        };
+        if changed {
+            self.search_files();
+        }
+        self.redraw();
+        true
     }
 
     pub fn saved_window(&self) -> SavedWindow {
@@ -1030,6 +1514,7 @@ impl App {
         match action {
             Action::View(changes) => {
                 self.changes_view = changes;
+                self.blur_file_search();
                 self.sidebar_scroll = 0.0;
             }
             Action::Directory(path) => {
@@ -1054,10 +1539,17 @@ impl App {
             }
             Action::File(path) => self.show_preview(PreviewSource::File(path)),
             Action::Diff(change, kind) => self.show_diff(change, kind),
-            Action::Refresh => self.refresh(true),
+            Action::Conflict(path) => self.show_preview(PreviewSource::File(path)),
+            Action::Merge(action) => self.merge_action(action),
+            Action::StageResolved => self.stage_resolved(),
+            Action::Refresh => {
+                self.refresh(true);
+                self.search_files();
+            }
             Action::Hidden => {
                 self.show_hidden = !self.show_hidden;
                 self.refresh(true);
+                self.search_files();
             }
             Action::Pin => {
                 self.pinned = if self.pinned.is_some() {
@@ -1069,6 +1561,13 @@ impl App {
             }
             Action::ClosePreview => self.request_leave(PendingAction::ClosePreview),
             Action::SaveFile => self.save_file(None),
+            Action::FocusFileSearch => self.focus_file_search(),
+            Action::ClearFileSearch => {
+                self.file_search.clear();
+                self.file_search.focused = true;
+                self.preedit.clear();
+                self.search_files();
+            }
             Action::PromptChoice(choice) => self.resolve_save_prompt(choice),
             Action::PromptConfirm(confirm) => {
                 if confirm {
@@ -1202,24 +1701,28 @@ impl App {
             s.rect(
                 Bounds {
                     x: 14.0,
-                    y: TOP + 144.0,
+                    y: TOP + if self.changes_view { 144.0 } else { 183.0 },
                     w: self.sidebar - 28.0,
                     h: 1.0,
                 },
                 BORDER,
             );
+            if !self.changes_view {
+                self.paint_file_search_field(&mut s);
+            }
             let list = Bounds {
                 x: 10.0,
-                y: TOP + 157.0,
+                y: TOP + if self.changes_view { 157.0 } else { 196.0 },
                 w: self.sidebar - 20.0,
-                h: (height - TOP - 215.0).max(1.0),
+                h: (height - TOP - if self.changes_view { 215.0 } else { 254.0 }).max(1.0),
             };
             self.sidebar_max = 0.0;
             if self.changes_view {
                 if let Some(ws) = &self.workspace {
                     let groups = [
-                        ("UNSTAGED", DiffKind::Unstaged),
-                        ("STAGED", DiffKind::Staged),
+                        ("CONFLICTS", None),
+                        ("UNSTAGED", Some(DiffKind::Unstaged)),
+                        ("STAGED", Some(DiffKind::Staged)),
                     ];
                     let mut y = list.y - self.sidebar_scroll;
                     for (title, kind) in groups {
@@ -1227,10 +1730,16 @@ impl App {
                             .changes
                             .iter()
                             .filter(|c| match kind {
-                                DiffKind::Unstaged => c.is_unstaged() || c.is_untracked(),
-                                DiffKind::Staged => c.is_staged(),
+                                None => c.is_conflicted(),
+                                Some(DiffKind::Unstaged) => {
+                                    !c.is_conflicted() && (c.is_unstaged() || c.is_untracked())
+                                }
+                                Some(DiffKind::Staged) => !c.is_conflicted() && c.is_staged(),
                             })
                             .collect();
+                        if kind.is_none() && changes.is_empty() {
+                            continue;
+                        }
                         s.text(
                             20.0,
                             y,
@@ -1252,16 +1761,30 @@ impl App {
                                 h: 30.0,
                             };
                             if y >= list.y && y + b.h < list.y + list.h {
-                                let chosen = self
-                                    .preview
-                                    .as_ref()
-                                    .is_some_and(|d| matches!(&d.source, PreviewSource::Diff { change, kind: selected, .. } if change.path == c.path && *selected == kind));
+                                let chosen = self.preview.as_ref().is_some_and(|d| {
+                                    match (&d.source, kind) {
+                                        (PreviewSource::Conflict { path, .. }, None) => {
+                                            *path == ws.root.join(&c.path)
+                                        }
+                                        (
+                                            PreviewSource::Diff {
+                                                change,
+                                                kind: selected,
+                                                ..
+                                            },
+                                            Some(kind),
+                                        ) => change.path == c.path && *selected == kind,
+                                        _ => false,
+                                    }
+                                });
                                 if chosen {
                                     s.rect(b, SURFACE);
                                 }
-                                let badge = if c.is_untracked() {
+                                let badge = if kind.is_none() {
+                                    'U'
+                                } else if c.is_untracked() {
                                     '?'
-                                } else if kind == DiffKind::Staged {
+                                } else if kind == Some(DiffKind::Staged) {
                                     c.index_status
                                 } else {
                                     c.worktree_status
@@ -1286,7 +1809,13 @@ impl App {
                                         ..b
                                     },
                                 );
-                                s.hits.push((b, Action::Diff(c.clone(), kind)));
+                                s.hits.push((
+                                    b,
+                                    match kind {
+                                        Some(kind) => Action::Diff(c.clone(), kind),
+                                        None => Action::Conflict(ws.root.join(&c.path)),
+                                    },
+                                ));
                             }
                             y += 30.0;
                         }
@@ -1310,6 +1839,8 @@ impl App {
                         list,
                     );
                 }
+            } else if !self.file_search.query.trim().is_empty() {
+                self.paint_file_search_results(&mut s, &root, list);
             } else {
                 let mut rows = Vec::new();
                 self.collect_tree(&root, 0, &mut rows);
@@ -1330,7 +1861,8 @@ impl App {
                         let selected = self.preview.as_ref().is_some_and(|preview| match &preview
                             .source
                         {
-                            PreviewSource::File(selected) => selected == &path,
+                            PreviewSource::File(selected)
+                            | PreviewSource::Conflict { path: selected, .. } => selected == &path,
                             PreviewSource::Diff { root, change, .. } => {
                                 root.join(&change.path) == path
                             }
@@ -1570,7 +2102,7 @@ impl App {
                         },
                         GREEN,
                     );
-                    if !self.preedit.is_empty() {
+                    if !self.preedit.is_empty() && !self.file_search.focused {
                         for run in &mut s.texts {
                             if (run.y - y).abs() < 0.1
                                 && run.clip[0] >= terminal.x
@@ -1593,7 +2125,9 @@ impl App {
                             run.line_height = self.cell.1;
                         }
                     }
-                    if let Some(w) = &self.window {
+                    if !self.file_search.focused
+                        && let Some(w) = &self.window
+                    {
                         w.set_ime_cursor_area(
                             LogicalPosition::new(x, y + self.cell.1),
                             LogicalSize::new(self.cell.0, self.cell.1),
@@ -1626,6 +2160,7 @@ impl App {
             s.panes.clear();
             s.dividers.clear();
             s.editor = None;
+            s.comparison = None;
             s.rect(all, [0, 0, 0, 160]);
             let b = Bounds {
                 x: (width - 500.0) / 2.0,
@@ -1722,6 +2257,189 @@ impl App {
         s
     }
 
+    fn paint_file_search_field(&self, scene: &mut Scene) {
+        let field = Bounds {
+            x: 14.0,
+            y: TOP + 143.0,
+            w: self.sidebar - 28.0,
+            h: 30.0,
+        };
+        scene.rect(field, SURFACE);
+        scene.hits.push((field, Action::FocusFileSearch));
+        let clip = Bounds {
+            x: field.x + 9.0,
+            w: field.w - 43.0,
+            ..field
+        };
+        let search = &self.file_search;
+        let mut start = search.cursor;
+        let mut columns = 0;
+        let available = (clip.w / 7.2).max(1.0) as usize;
+        for (index, grapheme) in search.query[..search.cursor].grapheme_indices(true).rev() {
+            let width = editor_view::visual_width(grapheme);
+            if columns + width >= available {
+                break;
+            }
+            columns += width;
+            start = index;
+        }
+        let preedit = if search.focused {
+            self.preedit.as_str()
+        } else {
+            ""
+        };
+        let display = format!(
+            "{}{}{}",
+            &search.query[start..search.cursor],
+            preedit,
+            &search.query[search.cursor..]
+        );
+        if search.focused && search.select_all {
+            scene.rect(
+                Bounds {
+                    x: clip.x,
+                    y: field.y + 5.0,
+                    w: (editor_view::visual_width(&display) as f32 * 7.2).min(clip.w),
+                    h: 20.0,
+                },
+                [43, 73, 66, 255],
+            );
+        }
+        scene.text(
+            clip.x,
+            field.y + 6.0,
+            if display.is_empty() {
+                "Search files…  ⌘P"
+            } else {
+                &display
+            },
+            12.0,
+            if display.is_empty() { MUTED } else { FG },
+            clip,
+        );
+        if search.focused {
+            scene.rect(
+                Bounds {
+                    y: field.y + field.h - 1.0,
+                    h: 1.0,
+                    ..field
+                },
+                GREEN,
+            );
+            let x = (clip.x + (columns + editor_view::visual_width(preedit)) as f32 * 7.2)
+                .min(clip.x + clip.w - 1.0);
+            scene.rect(
+                Bounds {
+                    x,
+                    y: field.y + 6.0,
+                    w: 1.0,
+                    h: 18.0,
+                },
+                GREEN,
+            );
+            if let Some(window) = &self.window {
+                window.set_ime_cursor_area(
+                    LogicalPosition::new(x, field.y + field.h),
+                    LogicalSize::new(7.2, 18.0),
+                );
+            }
+        }
+        if !search.query.is_empty() {
+            scene.button(
+                Bounds {
+                    x: field.x + field.w - 30.0,
+                    w: 30.0,
+                    ..field
+                },
+                "×",
+                Action::ClearFileSearch,
+                false,
+            );
+        }
+    }
+
+    fn paint_file_search_results(&mut self, scene: &mut Scene, root: &Path, list: Bounds) {
+        let search = &self.file_search;
+        let status = if search.busy {
+            "Searching…".to_string()
+        } else if let Some(error) = &search.error {
+            error.clone()
+        } else if search.truncated {
+            format!("{} files · partial results", search.paths.len())
+        } else if search.paths.is_empty() {
+            "No matching files".to_string()
+        } else {
+            format!("{} files · ↑↓ select · Enter open", search.paths.len())
+        };
+        scene.text(
+            20.0,
+            list.y,
+            status,
+            10.0,
+            if search.error.is_some() || search.truncated {
+                AMBER
+            } else {
+                MUTED
+            },
+            list,
+        );
+        let results = Bounds {
+            y: list.y + 24.0,
+            h: (list.h - 24.0).max(1.0),
+            ..list
+        };
+        self.sidebar_max = (search.paths.len() as f32 * 44.0 - results.h).max(0.0);
+        for (index, relative) in search.paths.iter().enumerate() {
+            let y = results.y + index as f32 * 44.0 - self.sidebar_scroll;
+            let bounds = Bounds {
+                x: 14.0,
+                y,
+                w: self.sidebar - 28.0,
+                h: 44.0,
+            };
+            if y < results.y || y + bounds.h > results.y + results.h {
+                continue;
+            }
+            let path = root.join(relative);
+            let opened = self.preview.as_ref().is_some_and(
+                |preview| matches!(&preview.source, PreviewSource::File(file) | PreviewSource::Conflict { path: file, .. } if file == &path),
+            );
+            if (search.focused && index == search.selected) || (!search.focused && opened) {
+                scene.rect(bounds, SURFACE);
+                scene.rect(Bounds { w: 2.0, ..bounds }, GREEN);
+            }
+            let text_bounds = Bounds {
+                x: 23.0,
+                w: self.sidebar - 65.0,
+                ..bounds
+            };
+            scene.text(23.0, y + 4.0, name_of(relative), 12.0, FG, text_bounds);
+            let parent = relative
+                .parent()
+                .filter(|parent| !parent.as_os_str().is_empty())
+                .map(|parent| parent.to_string_lossy().into_owned())
+                .unwrap_or_else(|| ".".into());
+            scene.text(23.0, y + 23.0, parent, 10.0, MUTED, text_bounds);
+            if let Some(change) = self.workspace.as_ref().and_then(|workspace| {
+                workspace
+                    .changes
+                    .iter()
+                    .find(|change| &change.path == relative)
+            }) {
+                let badge = change.badge();
+                scene.text(
+                    self.sidebar - 34.0,
+                    y + 5.0,
+                    badge.to_string(),
+                    12.0,
+                    status_color(badge),
+                    bounds,
+                );
+            }
+            scene.hits.push((bounds, Action::File(path)));
+        }
+    }
+
     fn collect_tree(
         &self,
         dir: &Path,
@@ -1759,7 +2477,7 @@ impl App {
         };
         let diff_kind = match &preview.source {
             PreviewSource::Diff { kind, .. } => Some(*kind),
-            PreviewSource::File(_) => None,
+            PreviewSource::File(_) | PreviewSource::Conflict { .. } => None,
         };
         let path = preview.source.path();
         let label = self
@@ -1787,7 +2505,15 @@ impl App {
                 FG
             },
             Bounds {
-                w: (b.w - if diff_kind.is_some() { 230.0 } else { 165.0 }).max(10.0),
+                w: (b.w
+                    - if preview.merge.is_some() {
+                        320.0
+                    } else if diff_kind.is_some() {
+                        230.0
+                    } else {
+                        165.0
+                    })
+                .max(10.0),
                 ..b
             },
         );
@@ -1816,6 +2542,35 @@ impl App {
             );
         }
         if preview.document.is_some() {
+            if let Some(merge) = &preview.merge {
+                let bounds = Bounds {
+                    x: b.x + b.w - 305.0,
+                    y: b.y + 10.0,
+                    w: 162.0,
+                    h: 28.0,
+                };
+                let ready = !merge.unresolved()
+                    && !merge.staged
+                    && !merge.staging
+                    && !preview.saving
+                    && preview
+                        .document
+                        .as_ref()
+                        .is_some_and(|document| !document.is_dirty());
+                s.rect(bounds, if ready { BORDER } else { PANEL });
+                s.button(
+                    bounds,
+                    if merge.staging {
+                        "Marking resolved…"
+                    } else if merge.staged {
+                        "Staged"
+                    } else {
+                        "Mark resolved"
+                    },
+                    Action::StageResolved,
+                    ready,
+                );
+            }
             s.button(
                 Bounds {
                     x: b.x + b.w - 136.0,
@@ -1843,15 +2598,40 @@ impl App {
             Action::ClosePreview,
             false,
         );
-        let clip = Bounds {
+        let mut clip = Bounds {
             x: b.x + 12.0,
             y: b.y + 52.0,
             w: b.w - 24.0,
             h: b.h - 64.0,
         };
         if let Some(document) = &preview.document {
+            if let Some(merge) = &preview.merge {
+                let frame = merge_view::paint(
+                    document.text(),
+                    &preview.highlights.spans,
+                    &merge.conflicts,
+                    merge.selected,
+                    merge.error.as_deref(),
+                    clip,
+                    self.font,
+                    self.cell,
+                    merge.offset,
+                    merge.column,
+                );
+                clip = frame.editor_bounds;
+                s.comparison = frame.comparison_bounds;
+                s.rects.extend(frame.rects);
+                s.texts.extend(frame.texts);
+                s.hits.extend(
+                    frame
+                        .buttons
+                        .into_iter()
+                        .map(|(bounds, action)| (bounds, Action::Merge(action))),
+                );
+            }
             let frame = editor_view::paint(
                 document,
+                &preview.highlights.spans,
                 clip,
                 preview.offset,
                 preview.column,
@@ -1862,7 +2642,7 @@ impl App {
             s.rects.extend(frame.rects);
             s.texts.extend(frame.texts);
             if let Some((x, y)) = frame.cursor {
-                if !self.preedit.is_empty() {
+                if !self.preedit.is_empty() && !self.file_search.focused {
                     for run in &mut s.texts {
                         if (run.y - y).abs() < 0.1 && run.x >= frame.text_bounds.x {
                             run.clip[2] = run.clip[2].min(x);
@@ -1870,7 +2650,9 @@ impl App {
                     }
                     s.text(x, y, &self.preedit, self.font, GREEN, frame.text_bounds);
                 }
-                if let Some(window) = &self.window {
+                if !self.file_search.focused
+                    && let Some(window) = &self.window
+                {
                     window.set_ime_cursor_area(
                         LogicalPosition::new(x, y + self.cell.1),
                         LogicalSize::new(self.cell.0, self.cell.1),
@@ -1878,7 +2660,7 @@ impl App {
                 }
             }
             let (row, col) = document.cursor_position();
-            let status = if preview.notice.is_empty() {
+            let mut status = if preview.notice.is_empty() {
                 format!(
                     "{} · Ln {}, Col {} · ⌘S save · Esc return",
                     if document.is_dirty() {
@@ -1892,6 +2674,12 @@ impl App {
             } else {
                 preview.notice.clone()
             };
+            if preview.highlights.limited {
+                status.push_str(" · Partial highlighting");
+            } else if let Some(language) = &preview.highlights.language {
+                status.push_str(" · ");
+                status.push_str(language);
+            }
             s.text(
                 b.x + 18.0,
                 b.y + b.h - 16.0,
@@ -2114,7 +2902,14 @@ impl App {
             Key::Character(s) => Some(s.to_lowercase()),
             _ => None,
         };
-        if self.editor_key(&key, text) {
+        if command && character.as_deref() == Some("p") {
+            self.focus_file_search();
+            return;
+        }
+        if self.file_search_key(&key, text) {
+            return;
+        }
+        if !self.file_search.focused && self.editor_key(&key, text) {
             return;
         }
         if command {
@@ -2143,7 +2938,10 @@ impl App {
                     self.prompt = Some(Prompt::Quit);
                     self.redraw();
                 }
-                Some("r") => self.refresh(true),
+                Some("r") => {
+                    self.refresh(true);
+                    self.search_files();
+                }
                 Some("f") => {
                     self.prompt = Some(Prompt::Search(String::new()));
                     self.redraw();
@@ -2158,6 +2956,7 @@ impl App {
                 }
                 Some("e") => {
                     self.changes_view = !self.changes_view;
+                    self.blur_file_search();
                     self.sidebar_scroll = 0.0;
                     self.redraw();
                 }
@@ -2266,6 +3065,39 @@ impl App {
                 .min(d.content().split('\n').count().saturating_sub(1));
         }
     }
+    fn scroll_comparison(&mut self, steps: i32, horizontal: bool) {
+        let Some(preview) = &mut self.preview else {
+            return;
+        };
+        let (Some(merge), Some(document)) = (&mut preview.merge, &preview.document) else {
+            return;
+        };
+        let Some(conflict) = merge.conflicts.get(merge.selected) else {
+            return;
+        };
+        let sides = [
+            &document.text()[conflict.current.clone()],
+            &document.text()[conflict.incoming.clone()],
+        ];
+        if horizontal {
+            let max = sides
+                .iter()
+                .flat_map(|text| text.lines())
+                .map(editor_view::visual_width)
+                .max()
+                .unwrap_or(0)
+                .saturating_sub(1);
+            merge.column = merge.column.saturating_add_signed(steps as isize).min(max);
+        } else {
+            let max = sides
+                .iter()
+                .map(|text| text.lines().count())
+                .max()
+                .unwrap_or(0)
+                .saturating_sub(1);
+            merge.offset = merge.offset.saturating_add_signed(steps as isize).min(max);
+        }
+    }
     fn scroll_preview_x(&mut self, columns: i32) {
         if let Some(preview) = &mut self.preview {
             let maximum = preview
@@ -2316,6 +3148,17 @@ impl App {
 
     pub fn user_event(&mut self, _event_loop: &ActiveEventLoop, event: Event) {
         match event {
+            Event::Highlighted { token, result } => {
+                if let Some(preview) = &mut self.preview
+                    && preview.highlight_token == token
+                    && preview.document.as_ref().is_some_and(|document| {
+                        preview.highlight_revision == Some(document.revision())
+                    })
+                {
+                    preview.highlights = result;
+                    self.redraw();
+                }
+            }
             Event::Wake => {
                 if self.preview.is_none()
                     && self
@@ -2354,7 +3197,7 @@ impl App {
                     self.sidebar_scroll = 0.0;
                     if !matches!(
                         self.preview.as_ref().map(|p| &p.source),
-                        Some(PreviewSource::File(_))
+                        Some(PreviewSource::File(_) | PreviewSource::Conflict { .. })
                     ) {
                         self.preview = None;
                     }
@@ -2379,7 +3222,11 @@ impl App {
                     self.expanded.contains(p)
                         || self.workspace.as_ref().is_some_and(|w| &w.root == p)
                 });
+                self.sync_conflict_preview();
                 self.reload_preview();
+                if root_changed {
+                    self.search_files();
+                }
                 if changed {
                     self.redraw();
                 }
@@ -2413,6 +3260,12 @@ impl App {
                     preview.loading = false;
                     match result {
                         Ok(loaded) => {
+                            if let Some(root) = loaded.conflict_root {
+                                preview.source = PreviewSource::Conflict {
+                                    root,
+                                    path: preview.source.path().to_owned(),
+                                };
+                            }
                             preview.text = loaded.text;
                             preview.document = loaded.document;
                             preview.notice = loaded.notice;
@@ -2428,6 +3281,30 @@ impl App {
                         .offset
                         .min(preview.content().split('\n').count().saturating_sub(1));
                     self.draft_revision += 1;
+                    self.sync_conflict_preview();
+                    self.update_highlighting();
+                    self.redraw();
+                }
+            }
+            Event::ConflictStaged { token, result } => {
+                if let Some(preview) = &mut self.preview
+                    && preview.token == token
+                    && let Some(merge) = &mut preview.merge
+                {
+                    merge.staging = false;
+                    match result {
+                        Ok(()) => {
+                            merge.staged = preview.document.as_ref().is_some_and(|d| !d.is_dirty());
+                            preview.notice = if merge.staged {
+                                "Resolved and staged · continue Git in the terminal"
+                            } else {
+                                "Saved version staged · newer edits remain unsaved"
+                            }
+                            .into();
+                        }
+                        Err(error) => preview.notice = error,
+                    }
+                    self.refresh(true);
                     self.redraw();
                 }
             }
@@ -2449,6 +3326,20 @@ impl App {
                     self.refresh(true);
                     self.redraw();
                 }
+            }
+            Event::FileSearch { token, result } => {
+                if token != self.file_search.token {
+                    return;
+                }
+                self.file_search.busy = false;
+                match result {
+                    Ok(result) => {
+                        self.file_search.paths = result.paths;
+                        self.file_search.truncated = result.truncated;
+                    }
+                    Err(error) => self.file_search.error = Some(error),
+                }
+                self.redraw();
             }
         }
     }
@@ -2492,6 +3383,10 @@ impl App {
                         text.chars()
                             .take(256usize.saturating_sub(value.chars().count())),
                     );
+                } else if self.prompt.is_none() && self.file_search.focused {
+                    if self.file_search.insert(&text) {
+                        self.search_files();
+                    }
                 } else if self.prompt.is_none()
                     && self.preview.as_ref().is_some_and(|p| p.document.is_some())
                 {
@@ -2677,6 +3572,13 @@ impl App {
                     }
                     return;
                 }
+                let search_control = self.scene.hits.iter().any(|(bounds, action)| {
+                    bounds.contains(self.mouse.0, self.mouse.1)
+                        && matches!(action, Action::FocusFileSearch | Action::ClearFileSearch)
+                });
+                if !search_control {
+                    self.blur_file_search();
+                }
                 if self
                     .scene
                     .editor
@@ -2750,7 +3652,9 @@ impl App {
                     .iter()
                     .find(|(b, _)| b.contains(self.mouse.0, self.mouse.1))
                     .and_then(|(_, a)| match a {
-                        Action::File(p) | Action::Directory(p) => Some(p.clone()),
+                        Action::File(p) | Action::Directory(p) | Action::Conflict(p) => {
+                            Some(p.clone())
+                        }
                         Action::Diff(c, _) => self.workspace.as_ref().map(|w| w.root.join(&c.path)),
                         _ => None,
                     });
@@ -2770,6 +3674,21 @@ impl App {
                 if self.sidebar_visible && self.mouse.0 < self.sidebar {
                     self.sidebar_scroll =
                         (self.sidebar_scroll + lines * 12.0).clamp(0.0, self.sidebar_max);
+                } else if self
+                    .scene
+                    .comparison
+                    .is_some_and(|b| b.contains(self.mouse.0, self.mouse.1))
+                {
+                    let horizontal_scroll =
+                        self.modifiers.shift_key() || horizontal.abs() > lines.abs();
+                    self.wheel_remainder += if horizontal_scroll && !self.modifiers.shift_key() {
+                        horizontal
+                    } else {
+                        lines
+                    };
+                    let steps = self.wheel_remainder.trunc() as i32;
+                    self.wheel_remainder -= steps as f32;
+                    self.scroll_comparison(steps, horizontal_scroll);
                 } else if self.preview.is_some()
                     && (self.modifiers.shift_key() || horizontal.abs() > lines.abs())
                 {
@@ -2802,6 +3721,7 @@ impl App {
             WindowEvent::DroppedFile(path) => {
                 if self.prompt.is_none()
                     && self.preview.is_none()
+                    && !self.file_search.focused
                     && let Some(s) = self.active_session()
                 {
                     let quoted = format!("'{}' ", path.to_string_lossy().replace('\'', "'\\''"));
@@ -2826,6 +3746,7 @@ impl App {
     }
 
     pub fn about_to_wait(&mut self) {
+        self.update_highlighting();
         if !self.occluded {
             self.refresh(false);
         }
@@ -2900,6 +3821,49 @@ mod editor_integration_tests {
     use super::*;
 
     #[test]
+    fn choosing_conflicts_and_undo_refresh_the_result_and_save_gate() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        let original = "# before\n<<<<<<< HEAD\n当前\n=======\n传入\n>>>>>>> topic\n# between\n<<<<<<< HEAD\nold\n=======\nnew\n>>>>>>> topic\n# after\n";
+        std::fs::write(&path, original).unwrap();
+        let mut document = Document::open(&path).unwrap();
+        let mut state = MergeState::default();
+        state.refresh(document.text());
+        for choice in [merge::Choice::Both, merge::Choice::Incoming] {
+            assert!(state.unresolved());
+            let conflict = &state.conflicts[0];
+            document
+                .replace_range(
+                    conflict.range.clone(),
+                    &conflict.replacement(document.text(), choice),
+                )
+                .unwrap();
+            state.refresh(document.text());
+        }
+        assert!(!state.unresolved());
+        assert_eq!(
+            document.text(),
+            "# before\n当前\n传入\n# between\nnew\n# after\n"
+        );
+        assert!(document.saved_bytes().is_none());
+        document.undo();
+        state.refresh(document.text());
+        assert!(state.unresolved());
+        assert_eq!(state.conflicts.len(), 1);
+        document.undo();
+        state.refresh(document.text());
+        assert_eq!(document.text(), original);
+        assert_eq!(state.conflicts.len(), 2);
+        assert!(!document.is_dirty());
+        document.select_all();
+        document.insert("<<<<<<< incomplete\n").unwrap();
+        state.refresh(document.text());
+        assert!(state.unresolved());
+        assert!(state.error.is_some());
+        assert_eq!(std::fs::read_to_string(path).unwrap(), original);
+    }
+
+    #[test]
     fn save_completion_keeps_new_input_dirty_and_visible() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("config.toml");
@@ -2919,6 +3883,10 @@ mod editor_integration_tests {
             document: Some(document),
             saving: true,
             notice: String::new(),
+            merge: None,
+            highlight_revision: None,
+            highlight_token: 0,
+            highlights: Highlights::default(),
         };
         assert!(preview.finish_save(save.save().map_err(|e| e.to_string())));
         assert!(preview.document.as_ref().unwrap().is_dirty());

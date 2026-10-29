@@ -1,4 +1,5 @@
-//! Bounded, read-only workspace queries. Call these functions off the UI thread.
+//! Bounded workspace queries and explicitly requested conflict staging.
+//! Call these functions off the UI thread.
 
 use std::ffi::{OsStr, OsString};
 use std::fs;
@@ -15,6 +16,10 @@ const MAX_DIFF_BYTES: usize = 256 * 1024;
 const MAX_CHANGES: usize = 8192;
 const MAX_DIRECTORY_ENTRIES: usize = 4096;
 const GIT_TIMEOUT: Duration = Duration::from_secs(8);
+const MAX_SEARCH_RESULTS: usize = 200;
+const MAX_SEARCH_ENTRIES: usize = 50_000;
+const MAX_SEARCH_BYTES: usize = 4 * 1024 * 1024;
+const SEARCH_TIMEOUT: Duration = Duration::from_secs(2);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WorkspaceSnapshot {
@@ -182,6 +187,185 @@ pub fn read_directory(path: &Path, show_hidden: bool) -> Result<DirectoryListing
             .then_with(|| left.name.cmp(&right.name))
     });
     Ok(DirectoryListing { entries, truncated })
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FileSearchResult {
+    /// File paths relative to the supplied search root.
+    pub paths: Vec<PathBuf>,
+    /// A result, scan, byte, time, or cancellation limit stopped the search.
+    pub truncated: bool,
+}
+
+/// Search on demand without retaining a project-wide index. Symbolic links may
+/// be returned as entries, but directories reached through them are never read.
+pub fn search_files(
+    root: &Path,
+    query: &str,
+    show_hidden: bool,
+    cancelled: impl Fn() -> bool,
+) -> Result<FileSearchResult> {
+    let mut result = FileSearchResult {
+        paths: Vec::new(),
+        truncated: false,
+    };
+    if cancelled() {
+        result.truncated = true;
+        return Ok(result);
+    }
+    if query.is_empty() {
+        return Ok(result);
+    }
+    let deadline = Instant::now() + SEARCH_TIMEOUT;
+    if !fs::symlink_metadata(root)
+        .context("Cannot read search root")?
+        .is_dir()
+    {
+        bail!("Search root must be a directory, not a symbolic link");
+    }
+    let query = query.to_lowercase();
+    let output = git_until(
+        root,
+        ["ls-files", "-co", "--exclude-standard", "-z"],
+        MAX_SEARCH_BYTES,
+        deadline,
+        &cancelled,
+    );
+    match output {
+        Ok(output) if output.success || output.truncated => {
+            result.truncated = output.truncated;
+            for (scanned, record) in output.bytes.split_inclusive(|byte| *byte == 0).enumerate() {
+                if cancelled() || Instant::now() >= deadline || scanned >= MAX_SEARCH_ENTRIES {
+                    result.truncated = true;
+                    break;
+                }
+                if record.last() != Some(&0) {
+                    result.truncated = true;
+                    break;
+                }
+                let relative = bytes_path(&record[..record.len() - 1]);
+                if !search_visible(&relative, show_hidden)
+                    || !relative.to_string_lossy().to_lowercase().contains(&query)
+                    || !search_file_entry(root, &relative)
+                {
+                    continue;
+                }
+                if !result.paths.contains(&relative) {
+                    if result.paths.len() == MAX_SEARCH_RESULTS {
+                        result.truncated = true;
+                        break;
+                    }
+                    result.paths.push(relative);
+                }
+            }
+        }
+        output => {
+            // A real repository error must not silently bypass its ignore rules.
+            let repository = root
+                .ancestors()
+                .any(|path| fs::symlink_metadata(path.join(".git")).is_ok());
+            if repository {
+                output?;
+                bail!("Git could not list searchable files");
+            }
+            let mut pending = vec![PathBuf::new()];
+            let mut scanned = 0usize;
+            let mut bytes = 0usize;
+            'directories: while let Some(directory) = pending.pop() {
+                if cancelled() || Instant::now() >= deadline {
+                    result.truncated = true;
+                    break;
+                }
+                let full = root.join(&directory);
+                if !fs::symlink_metadata(&full).is_ok_and(|metadata| metadata.is_dir()) {
+                    continue;
+                }
+                let listing = match fs::read_dir(&full) {
+                    Ok(listing) => listing,
+                    Err(error) if directory.as_os_str().is_empty() => {
+                        return Err(error).context("Cannot search directory");
+                    }
+                    Err(_) => {
+                        result.truncated = true;
+                        continue;
+                    }
+                };
+                for entry in listing {
+                    if cancelled() || Instant::now() >= deadline || scanned >= MAX_SEARCH_ENTRIES {
+                        result.truncated = true;
+                        break 'directories;
+                    }
+                    scanned += 1;
+                    let entry = match entry {
+                        Ok(entry) => entry,
+                        Err(_) => {
+                            result.truncated = true;
+                            continue;
+                        }
+                    };
+                    let relative = directory.join(entry.file_name());
+                    bytes = bytes.saturating_add(relative.as_os_str().as_encoded_bytes().len());
+                    if bytes > MAX_SEARCH_BYTES {
+                        result.truncated = true;
+                        break 'directories;
+                    }
+                    if !search_visible(&relative, show_hidden) {
+                        continue;
+                    }
+                    let kind = match entry.file_type() {
+                        Ok(kind) => kind,
+                        Err(_) => {
+                            result.truncated = true;
+                            continue;
+                        }
+                    };
+                    if kind.is_dir() {
+                        pending.push(relative);
+                    } else if (kind.is_file() || kind.is_symlink())
+                        && relative.to_string_lossy().to_lowercase().contains(&query)
+                    {
+                        if result.paths.len() == MAX_SEARCH_RESULTS {
+                            result.truncated = true;
+                            break 'directories;
+                        }
+                        result.paths.push(relative);
+                    }
+                }
+            }
+        }
+    }
+    result.paths.sort();
+    Ok(result)
+}
+
+fn search_visible(relative: &Path, show_hidden: bool) -> bool {
+    !relative.as_os_str().is_empty()
+        && relative.components().all(|component| {
+            let Component::Normal(name) = component else {
+                return false;
+            };
+            let name = name.to_string_lossy();
+            !name.eq_ignore_ascii_case(".git") && (show_hidden || !name.starts_with('.'))
+        })
+}
+
+fn search_file_entry(root: &Path, relative: &Path) -> bool {
+    let mut current = root.to_path_buf();
+    let mut components = relative.components().peekable();
+    while let Some(component) = components.next() {
+        current.push(component.as_os_str());
+        let Ok(metadata) = fs::symlink_metadata(&current) else {
+            return false;
+        };
+        if components.peek().is_some() {
+            if !metadata.is_dir() {
+                return false;
+            }
+        } else {
+            return metadata.is_file() || metadata.file_type().is_symlink();
+        }
+    }
+    false
 }
 
 /// Read a bounded, plain-text preview without opening an external application.
@@ -374,6 +558,208 @@ fn validate_relative_path(path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Mark one saved text conflict as resolved. This only stages the named file;
+/// it never commits, continues a merge, or stages any other path.
+pub fn stage_resolved(root: &Path, relative: &Path, expected: &[u8]) -> Result<()> {
+    validate_relative_path(relative)?;
+    if expected.len() > MAX_DIFF_BYTES {
+        bail!("Only text conflicts up to 256 KiB can be marked resolved here");
+    }
+    let root_metadata = fs::symlink_metadata(root).context("Cannot inspect repository root")?;
+    if !root_metadata.is_dir() || root_metadata.file_type().is_symlink() {
+        bail!("The repository root must be a directory, not a symbolic link");
+    }
+    validate_text_conflict(root, relative)?;
+    let text = std::str::from_utf8(expected)
+        .context("Only UTF-8 text conflicts can be marked resolved here")?;
+    if expected.contains(&0) {
+        bail!("Binary conflicts must be resolved with Git");
+    }
+    match crate::merge::parse(text.strip_prefix('\u{feff}').unwrap_or(text)) {
+        Ok(conflicts) if conflicts.is_empty() => {}
+        Ok(_) => bail!("Conflict markers remain. Resolve every conflict and save the file first"),
+        Err(error) => bail!("Incomplete conflict markers remain: {error}"),
+    }
+    check_resolved_file(root, relative, expected)?;
+
+    let unmerged_args = [
+        OsStr::new("ls-files"),
+        OsStr::new("--unmerged"),
+        OsStr::new("-z"),
+        OsStr::new("--"),
+        relative.as_os_str(),
+    ];
+    let unmerged = git(root, unmerged_args, MAX_STATUS_BYTES)?;
+    if !unmerged.success || unmerged.truncated {
+        bail!("Git could not verify this file's unresolved index entries");
+    }
+    if unmerged.bytes.is_empty() {
+        bail!("This file no longer has an unresolved conflict in the Git index. Refresh Changes");
+    }
+    let mut stages: [Option<String>; 3] = [None, None, None];
+    for record in unmerged.bytes.split_inclusive(|byte| *byte == 0) {
+        let record = record
+            .strip_suffix(&[0])
+            .context("Git returned an incomplete conflict entry")?;
+        let tab = record
+            .iter()
+            .position(|byte| *byte == b'\t')
+            .context("Git returned an invalid conflict entry")?;
+        if bytes_path(&record[tab + 1..]) != relative {
+            bail!("Git returned a conflict for a different path; nothing was staged");
+        }
+        let header = std::str::from_utf8(&record[..tab])
+            .context("Git returned an invalid conflict header")?;
+        let fields: Vec<_> = header.split_whitespace().collect();
+        if fields.len() != 3 || !matches!(fields[0], "100644" | "100755") {
+            bail!(
+                "Only regular text file conflicts can be marked resolved here; use Git for this conflict"
+            );
+        }
+        let stage = match fields[2] {
+            "1" => 0,
+            "2" => 1,
+            "3" => 2,
+            _ => bail!("Git returned an invalid conflict stage"),
+        };
+        let object = fields[1];
+        if !matches!(object.len(), 40 | 64)
+            || !object.bytes().all(|byte| byte.is_ascii_hexdigit())
+            || stages[stage].replace(object.to_owned()).is_some()
+        {
+            bail!("Git returned invalid or duplicate conflict entries");
+        }
+    }
+    if stages[1].is_none() || stages[2].is_none() {
+        bail!(
+            "Delete/modify and rename conflicts must be resolved with Git; both text sides are required"
+        );
+    }
+    for object in stages.iter().flatten() {
+        let blob = git(root, ["cat-file", "blob", object.as_str()], MAX_DIFF_BYTES)?;
+        if !blob.success
+            || blob.truncated
+            || blob.bytes.contains(&0)
+            || std::str::from_utf8(&blob.bytes).is_err()
+        {
+            bail!(
+                "Binary or large conflicts must be resolved with Git; each side must be UTF-8 text up to 256 KiB"
+            );
+        }
+    }
+    // Git queries may take time. Recheck the index and on-disk content before
+    // staging so a change during validation is not silently added.
+    let current = git(root, unmerged_args, MAX_STATUS_BYTES)?;
+    if !current.success || current.truncated || current.bytes != unmerged.bytes {
+        bail!("The conflict changed in the Git index. Refresh Changes before marking it resolved");
+    }
+    check_resolved_file(root, relative, expected)?;
+    let added = git(
+        root,
+        [OsStr::new("add"), OsStr::new("--"), relative.as_os_str()],
+        16 * 1024,
+    )?;
+    if !added.success || added.truncated {
+        bail!(
+            "Git could not mark this file resolved. Check repository permissions or index locks, then refresh Changes"
+        );
+    }
+    Ok(())
+}
+
+/// Check Git attributes before offering the text conflict editor or staging.
+/// Short custom markers are deliberately unsupported by the line parser, and
+/// Git's binary driver can leave marker-free UTF-8 files unresolved as well.
+pub fn validate_text_conflict(root: &Path, relative: &Path) -> Result<()> {
+    validate_relative_path(relative)?;
+    let attributes = git(
+        root,
+        [
+            OsStr::new("check-attr"),
+            OsStr::new("-z"),
+            OsStr::new("conflict-marker-size"),
+            OsStr::new("merge"),
+            OsStr::new("--"),
+            relative.as_os_str(),
+        ],
+        16 * 1024,
+    )?;
+    if !attributes.success || attributes.truncated {
+        bail!("Git could not verify this file's conflict attributes");
+    }
+    let fields: Vec<_> = attributes.bytes.split(|byte| *byte == 0).collect();
+    if fields.len() != 7
+        || !fields[6].is_empty()
+        || bytes_path(fields[0]) != relative
+        || bytes_path(fields[3]) != relative
+        || fields[1] != b"conflict-marker-size"
+        || fields[4] != b"merge"
+    {
+        bail!("Git returned invalid conflict attributes; nothing was staged");
+    }
+    if !matches!(fields[2], b"unspecified" | b"set" | b"unset") {
+        let size = std::str::from_utf8(fields[2])
+            .ok()
+            .and_then(|value| value.parse::<u32>().ok());
+        match size {
+            Some(size) if size < 7 => {
+                bail!(
+                    "Custom conflict markers below 7 characters are unsupported here; resolve this file with Git"
+                );
+            }
+            Some(size) if size <= i32::MAX as u32 => {}
+            _ => bail!("Unsupported conflict-marker-size attribute; resolve this file with Git"),
+        }
+    }
+    if matches!(fields[5], b"unset" | b"binary") {
+        bail!("Git attributes mark this as a binary merge conflict; resolve this file with Git");
+    }
+    Ok(())
+}
+
+fn check_resolved_file(root: &Path, relative: &Path, expected: &[u8]) -> Result<()> {
+    let mut path = root.to_path_buf();
+    let mut components = relative.components().peekable();
+    while let Some(component) = components.next() {
+        path.push(component.as_os_str());
+        let metadata =
+            fs::symlink_metadata(&path).context("Cannot inspect the resolved file path")?;
+        if metadata.file_type().is_symlink() {
+            bail!("Symbolic links cannot be marked resolved here; use Git for this conflict");
+        }
+        if components.peek().is_some() {
+            if !metadata.is_dir() {
+                bail!("The resolved file's parent is not a directory");
+            }
+        } else if !metadata.is_file() {
+            bail!("Only existing regular text files can be marked resolved here");
+        }
+    }
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(target_os = "macos")]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    let file = options
+        .open(&path)
+        .context("Cannot read the saved resolution")?;
+    if !file.metadata()?.is_file() {
+        bail!("The resolved path is no longer a regular file");
+    }
+    let mut bytes = Vec::new();
+    file.take((MAX_DIFF_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)
+        .context("Cannot read the saved resolution")?;
+    if bytes != expected {
+        bail!(
+            "The file changed on disk or has unsaved edits. Reload or save it before marking resolved"
+        );
+    }
+    Ok(())
+}
+
 fn strip_line_end(bytes: &[u8]) -> &[u8] {
     bytes.strip_suffix(b"\n").unwrap_or(bytes)
 }
@@ -431,6 +817,7 @@ struct GitOutput {
     bytes: Vec<u8>,
     success: bool,
     truncated: bool,
+    interrupted: bool,
 }
 
 /// `Child` itself does not terminate a process on drop. Keep error paths from
@@ -466,6 +853,32 @@ where
     I: IntoIterator<Item = S>,
     S: AsRef<OsStr>,
 {
+    let output = git_until(cwd, args, limit, Instant::now() + GIT_TIMEOUT, &|| false)?;
+    if output.interrupted {
+        bail!("Git query exceeded 8 seconds; use Refresh to try again");
+    }
+    Ok(output)
+}
+
+fn git_until<I, S>(
+    cwd: &Path,
+    args: I,
+    limit: usize,
+    deadline: Instant,
+    cancelled: &impl Fn() -> bool,
+) -> Result<GitOutput>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
+    if cancelled() || Instant::now() >= deadline {
+        return Ok(GitOutput {
+            bytes: Vec::new(),
+            success: false,
+            truncated: true,
+            interrupted: true,
+        });
+    }
     let mut child = GitChild(
         Command::new("git")
             .arg("--no-optional-locks")
@@ -501,16 +914,26 @@ where
             .map(|_| bytes);
         let _ = sender.send(result);
     });
-    let deadline = Instant::now() + GIT_TIMEOUT;
-    let mut output = None;
+    let mut output: Option<Vec<u8>> = None;
+    let mut status = None;
     loop {
+        if cancelled() || Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            let mut bytes = output.unwrap_or_default();
+            bytes.truncate(limit);
+            return Ok(GitOutput {
+                bytes,
+                success: false,
+                truncated: true,
+                interrupted: true,
+            });
+        }
         if output.is_none() {
             match receiver.try_recv() {
                 Ok(result) => output = Some(result.context("Cannot read Git output")?),
                 Err(mpsc::TryRecvError::Disconnected) => {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    bail!("Git output reader stopped unexpectedly");
+                    bail!("Git output reader stopped unexpectedly")
                 }
                 Err(mpsc::TryRecvError::Empty) => {}
             }
@@ -524,29 +947,21 @@ where
                 bytes,
                 success: false,
                 truncated: true,
+                interrupted: false,
             });
         }
-        if let Some(status) = child.try_wait()? {
-            let bytes = match output {
-                Some(bytes) => bytes,
-                None => receiver
-                    .recv_timeout(Duration::from_secs(1))
-                    .context("Git output did not close")?
-                    .context("Cannot read Git output")?,
-            };
-            let truncated = bytes.len() > limit;
-            let mut bytes = bytes;
-            bytes.truncate(limit);
+        if status.is_none() {
+            status = child.try_wait()?;
+        }
+        if let Some(status) = status
+            && let Some(bytes) = output.take()
+        {
             return Ok(GitOutput {
                 bytes,
                 success: status.success(),
-                truncated,
+                truncated: false,
+                interrupted: false,
             });
-        }
-        if Instant::now() >= deadline {
-            let _ = child.kill();
-            let _ = child.wait();
-            bail!("Git query exceeded 8 seconds; use Refresh to try again");
         }
         std::thread::sleep(Duration::from_millis(5));
     }
@@ -602,6 +1017,445 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.0);
         }
+    }
+
+    fn conflicted_repository(
+        path: &str,
+        base: Option<&[u8]>,
+        ours: &[u8],
+        theirs: &[u8],
+    ) -> TestDir {
+        conflicted_repository_with_attributes(path, base, ours, theirs, "")
+    }
+
+    fn conflicted_repository_with_attributes(
+        path: &str,
+        base: Option<&[u8]>,
+        ours: &[u8],
+        theirs: &[u8],
+        attributes: &str,
+    ) -> TestDir {
+        let dir = TestDir::new();
+        dir.init();
+        fs::create_dir_all(dir.0.join(path).parent().unwrap()).unwrap();
+        dir.write("unrelated.txt", "unchanged\n");
+        dir.write("other-conflict.txt", "base\n");
+        if !attributes.is_empty() {
+            dir.write(".gitattributes", attributes);
+        }
+        if let Some(base) = base {
+            fs::write(dir.0.join(path), base).unwrap();
+        }
+        dir.run(&["add", "."]);
+        dir.run(&["commit", "-qm", "base"]);
+        dir.run(&["checkout", "-qb", "incoming"]);
+        fs::write(dir.0.join(path), theirs).unwrap();
+        dir.write("other-conflict.txt", "theirs\n");
+        dir.run(&["add", "."]);
+        dir.run(&["commit", "-qm", "incoming"]);
+        dir.run(&["checkout", "-q", "main"]);
+        fs::write(dir.0.join(path), ours).unwrap();
+        dir.write("other-conflict.txt", "ours\n");
+        dir.run(&["add", "."]);
+        dir.run(&["commit", "-qm", "ours"]);
+        let merge = git(&dir.0, ["merge", "--no-edit", "incoming"], MAX_STATUS_BYTES).unwrap();
+        assert!(!merge.success, "fixture must create a real merge conflict");
+        dir
+    }
+
+    fn assert_still_unmerged(dir: &TestDir, path: &str) {
+        let unmerged = git(&dir.0, ["ls-files", "-u", "--", path], MAX_STATUS_BYTES).unwrap();
+        assert!(unmerged.success && !unmerged.bytes.is_empty());
+    }
+
+    #[test]
+    fn stage_resolved_only_stages_requested_literal_path() {
+        let path = "config[1]*.txt";
+        let dir = conflicted_repository(path, Some(b"base\n"), b"ours\n", b"theirs\n");
+        dir.write("unrelated.txt", "keep this unstaged\n");
+        dir.write("config1-other.txt", "also keep this untracked\n");
+        let resolved = "enabled = true\n# 已解决\n".as_bytes();
+        fs::write(dir.0.join(path), resolved).unwrap();
+        stage_resolved(&dir.0, Path::new(path), resolved).unwrap();
+
+        let stages = git(
+            &dir.0,
+            ["ls-files", "--stage", "-z", "--", path],
+            MAX_STATUS_BYTES,
+        )
+        .unwrap();
+        assert!(stages.success);
+        assert_eq!(stages.bytes.iter().filter(|byte| **byte == 0).count(), 1);
+        assert!(String::from_utf8_lossy(&stages.bytes).contains(" 0\tconfig[1]*.txt"));
+        let stored = git(&dir.0, ["show", &format!(":{path}")], MAX_DIFF_BYTES).unwrap();
+        assert!(stored.success);
+        assert_eq!(stored.bytes, resolved);
+        let unchanged = git(&dir.0, ["show", ":unrelated.txt"], MAX_DIFF_BYTES).unwrap();
+        assert_eq!(unchanged.bytes, b"unchanged\n");
+        let untracked = git(
+            &dir.0,
+            ["ls-files", "--", "config1-other.txt"],
+            MAX_STATUS_BYTES,
+        )
+        .unwrap();
+        assert!(untracked.bytes.is_empty());
+        assert_still_unmerged(&dir, "other-conflict.txt");
+        assert!(dir.0.join(".git/MERGE_HEAD").exists());
+        assert!(
+            stage_resolved(&dir.0, Path::new(path), resolved)
+                .unwrap_err()
+                .to_string()
+                .contains("no longer")
+        );
+    }
+
+    #[test]
+    fn stage_resolved_accepts_regular_add_add_text_conflicts() {
+        let path = "added.txt";
+        let dir = conflicted_repository(path, None, b"ours\n", b"theirs\n");
+        let resolved = b"ours\ntheirs\n";
+        fs::write(dir.0.join(path), resolved).unwrap();
+        stage_resolved(&dir.0, Path::new(path), resolved).unwrap();
+        let unmerged = git(&dir.0, ["ls-files", "-u", "--", path], MAX_STATUS_BYTES).unwrap();
+        assert!(unmerged.bytes.is_empty());
+        assert_still_unmerged(&dir, "other-conflict.txt");
+    }
+
+    #[test]
+    fn stage_resolved_rejects_short_custom_markers_and_binary_attributes() {
+        let path = "conflict.txt";
+        for attribute in ["conflict-marker-size=5", "binary", "merge=binary"] {
+            let dir = conflicted_repository_with_attributes(
+                path,
+                Some(b"base\n"),
+                b"ours\n",
+                b"theirs\n",
+                &format!("{path} {attribute}\n"),
+            );
+            let unresolved = fs::read(dir.0.join(path)).unwrap();
+            if attribute == "conflict-marker-size=5" {
+                assert!(unresolved.starts_with(b"<<<<< HEAD\n"));
+            } else {
+                assert_eq!(unresolved, b"ours\n");
+            }
+            // Both formats are valid Git conflicts without seven-character
+            // markers, so the attribute guard must run before the text parser.
+            assert!(
+                crate::merge::parse(std::str::from_utf8(&unresolved).unwrap())
+                    .unwrap()
+                    .is_empty()
+            );
+            let expected_message = if attribute == "conflict-marker-size=5" {
+                "below 7"
+            } else {
+                "binary merge conflict"
+            };
+            assert!(
+                validate_text_conflict(&dir.0, Path::new(path))
+                    .unwrap_err()
+                    .to_string()
+                    .contains(expected_message)
+            );
+            assert!(
+                stage_resolved(&dir.0, Path::new(path), &unresolved)
+                    .unwrap_err()
+                    .to_string()
+                    .contains(expected_message)
+            );
+            assert_still_unmerged(&dir, path);
+        }
+    }
+
+    #[test]
+    fn stage_resolved_accepts_long_custom_text_markers_after_resolution() {
+        let path = "conflict.txt";
+        let dir = conflicted_repository_with_attributes(
+            path,
+            Some(b"base\n"),
+            b"ours\n",
+            b"theirs\n",
+            "conflict.txt conflict-marker-size=9 merge=text\n",
+        );
+        validate_text_conflict(&dir.0, Path::new(path)).unwrap();
+        let unresolved = fs::read_to_string(dir.0.join(path)).unwrap();
+        assert!(unresolved.starts_with("<<<<<<<<< HEAD\n"));
+        assert_eq!(crate::merge::parse(&unresolved).unwrap().len(), 1);
+        dir.write(path, "resolved\n");
+        stage_resolved(&dir.0, Path::new(path), b"resolved\n").unwrap();
+        let unmerged = git(&dir.0, ["ls-files", "-u", "--", path], MAX_STATUS_BYTES).unwrap();
+        assert!(unmerged.bytes.is_empty());
+    }
+
+    #[test]
+    fn stage_resolved_rejects_markers_external_changes_and_invalid_paths() {
+        let path = "conflict.txt";
+        let dir = conflicted_repository(path, Some(b"base\n"), b"ours\n", b"theirs\n");
+        for text in [
+            "<<<<<<< HEAD\nours\n=======\ntheirs\n>>>>>>> incoming\n",
+            "<<<<<<< HEAD\nours\n=======\ntheirs\n",
+            "=======\ntrailing fragment\n",
+            "\u{feff}<<<<<<< HEAD\r\nours\r\n=======\r\ntheirs\r\n>>>>>>> incoming\r\n",
+        ] {
+            dir.write(path, text);
+            assert!(
+                stage_resolved(&dir.0, Path::new(path), text.as_bytes()).is_err(),
+                "{text:?}"
+            );
+            assert_still_unmerged(&dir, path);
+        }
+        dir.write(path, "external edit\n");
+        assert!(
+            stage_resolved(&dir.0, Path::new(path), b"saved editor contents\n")
+                .unwrap_err()
+                .to_string()
+                .contains("changed on disk")
+        );
+        for relative in [
+            "",
+            "..",
+            "../conflict.txt",
+            "./conflict.txt",
+            "nested/../../conflict.txt",
+            "/conflict.txt",
+        ] {
+            assert!(
+                stage_resolved(&dir.0, Path::new(relative), b"external edit\n").is_err(),
+                "{relative}"
+            );
+        }
+        dir.write(path, "\0binary");
+        assert!(stage_resolved(&dir.0, Path::new(path), b"\0binary").is_err());
+        fs::write(dir.0.join(path), [0xff]).unwrap();
+        assert!(stage_resolved(&dir.0, Path::new(path), &[0xff]).is_err());
+        let large = vec![b'a'; MAX_DIFF_BYTES + 1];
+        fs::write(dir.0.join(path), &large).unwrap();
+        assert!(stage_resolved(&dir.0, Path::new(path), &large).is_err());
+        assert_still_unmerged(&dir, path);
+    }
+
+    #[test]
+    fn stage_resolved_rejects_binary_index_conflicts_even_after_text_replacement() {
+        let path = "binary.dat";
+        let dir = conflicted_repository(path, Some(b"base\0"), b"ours\0", b"theirs\0");
+        dir.write(path, "replacement text\n");
+        assert!(
+            stage_resolved(&dir.0, Path::new(path), b"replacement text\n")
+                .unwrap_err()
+                .to_string()
+                .contains("Binary or large")
+        );
+        assert_still_unmerged(&dir, path);
+    }
+
+    #[test]
+    fn stage_resolved_rejects_delete_modify_conflicts() {
+        let path = "deleted.txt";
+        let dir = conflicted_repository(path, Some(b"base\n"), b"ours\n", b"theirs\n");
+        dir.run(&["merge", "--abort"]);
+        dir.run(&["rm", "--", path]);
+        dir.run(&["commit", "-qm", "delete on current side"]);
+        let merge = git(&dir.0, ["merge", "--no-edit", "incoming"], MAX_STATUS_BYTES).unwrap();
+        assert!(!merge.success);
+        let present_side = fs::read(dir.0.join(path)).unwrap();
+        assert!(
+            stage_resolved(&dir.0, Path::new(path), &present_side)
+                .unwrap_err()
+                .to_string()
+                .contains("both text sides")
+        );
+        assert_still_unmerged(&dir, path);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stage_resolved_rejects_file_and_parent_symlinks() {
+        use std::os::unix::fs::symlink;
+        let path = "nested/conflict.txt";
+        let dir = conflicted_repository(path, Some(b"base\n"), b"ours\n", b"theirs\n");
+        dir.write("resolution.txt", "resolved\n");
+        fs::remove_file(dir.0.join(path)).unwrap();
+        symlink(dir.0.join("resolution.txt"), dir.0.join(path)).unwrap();
+        assert!(
+            stage_resolved(&dir.0, Path::new(path), b"resolved\n")
+                .unwrap_err()
+                .to_string()
+                .contains("Symbolic links")
+        );
+        fs::remove_file(dir.0.join(path)).unwrap();
+        dir.write(path, "resolved\n");
+        fs::rename(dir.0.join("nested"), dir.0.join("renamed")).unwrap();
+        symlink(dir.0.join("renamed"), dir.0.join("nested")).unwrap();
+        assert!(
+            stage_resolved(&dir.0, Path::new(path), b"resolved\n")
+                .unwrap_err()
+                .to_string()
+                .contains("Symbolic links")
+        );
+        assert_still_unmerged(&dir, path);
+    }
+
+    #[test]
+    fn file_search_finds_deep_paths_case_insensitively_and_chinese() {
+        for repository in [false, true] {
+            let dir = TestDir::new();
+            if repository {
+                dir.init();
+            }
+            fs::create_dir_all(dir.0.join("src/unopened/deep")).unwrap();
+            dir.write("src/unopened/deep/CamelCase.rs", "");
+            dir.write("src/unopened/deep/中文文件.rs", "");
+            dir.write("unrelated.txt", "");
+
+            let result = search_files(&dir.0, "DEEP/cAMEL", false, || false).unwrap();
+            assert_eq!(
+                result.paths,
+                [PathBuf::from("src/unopened/deep/CamelCase.rs")]
+            );
+            assert!(!result.truncated);
+            let chinese = search_files(&dir.0, "中文", false, || false).unwrap();
+            assert_eq!(
+                chinese.paths,
+                [PathBuf::from("src/unopened/deep/中文文件.rs")]
+            );
+            assert!(!chinese.truncated);
+            // A repository subdirectory remains the supplied relative root.
+            let nested = search_files(&dir.0.join("src"), "camel", false, || false).unwrap();
+            assert_eq!(nested.paths, [PathBuf::from("unopened/deep/CamelCase.rs")]);
+        }
+    }
+
+    #[test]
+    fn file_search_obeys_hidden_setting_and_gitignore() {
+        for repository in [false, true] {
+            let dir = TestDir::new();
+            if repository {
+                dir.init();
+            }
+            fs::create_dir_all(dir.0.join(".hidden/nested")).unwrap();
+            fs::create_dir_all(dir.0.join("ignored")).unwrap();
+            dir.write(".gitignore", "ignored/\n*.cache\n");
+            dir.write("visible-needle.rs", "");
+            dir.write("tracked-needle.rs", "");
+            dir.write(".hidden/nested/needle.rs", "");
+            dir.write(".needle.rs", "");
+            dir.write("ignored/needle.rs", "");
+            dir.write("needle.cache", "");
+            if repository {
+                dir.run(&["add", "tracked-needle.rs"]);
+                dir.write(".git/needle", "must not be searched");
+            }
+
+            let visible = search_files(&dir.0, "needle", false, || false).unwrap();
+            assert!(!visible.truncated);
+            assert!(visible.paths.contains(&PathBuf::from("visible-needle.rs")));
+            assert!(visible.paths.contains(&PathBuf::from("tracked-needle.rs")));
+            assert!(
+                !visible
+                    .paths
+                    .iter()
+                    .any(|path| path.to_string_lossy().starts_with('.'))
+            );
+            assert_eq!(visible.paths.len(), if repository { 2 } else { 4 });
+
+            let hidden = search_files(&dir.0, "needle", true, || false).unwrap();
+            assert!(!hidden.truncated);
+            assert!(
+                hidden
+                    .paths
+                    .contains(&PathBuf::from(".hidden/nested/needle.rs"))
+            );
+            assert!(hidden.paths.contains(&PathBuf::from(".needle.rs")));
+            assert!(!hidden.paths.contains(&PathBuf::from(".git/needle")));
+            assert_eq!(hidden.paths.len(), if repository { 4 } else { 6 });
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn file_search_never_descends_directory_symlinks() {
+        use std::os::unix::fs::symlink;
+        let external = TestDir::new();
+        external.write("outside-needle.rs", "");
+        for repository in [false, true] {
+            let dir = TestDir::new();
+            if repository {
+                dir.init();
+                fs::create_dir(dir.0.join("replaced")).unwrap();
+                dir.write("replaced/outside-needle.rs", "");
+                dir.run(&["add", "replaced/outside-needle.rs"]);
+                fs::remove_dir_all(dir.0.join("replaced")).unwrap();
+                symlink(&external.0, dir.0.join("replaced")).unwrap();
+            }
+            dir.write("inside-needle.rs", "");
+            symlink(&external.0, dir.0.join("linked")).unwrap();
+            symlink(&dir.0, dir.0.join("cycle")).unwrap();
+            let result = search_files(&dir.0, "needle", true, || false).unwrap();
+            assert_eq!(result.paths, [PathBuf::from("inside-needle.rs")]);
+            assert!(!result.truncated);
+        }
+    }
+
+    #[test]
+    fn file_search_caps_results_and_marks_only_incomplete_results() {
+        for repository in [false, true] {
+            let dir = TestDir::new();
+            if repository {
+                dir.init();
+            }
+            for index in 0..MAX_SEARCH_RESULTS {
+                dir.write(&format!("needle-{index:03}.rs"), "");
+            }
+            let exact = search_files(&dir.0, "needle", false, || false).unwrap();
+            assert_eq!(exact.paths.len(), MAX_SEARCH_RESULTS);
+            assert!(!exact.truncated);
+            dir.write("needle-extra.rs", "");
+            let capped = search_files(&dir.0, "needle", false, || false).unwrap();
+            assert_eq!(capped.paths.len(), MAX_SEARCH_RESULTS);
+            assert!(capped.truncated);
+        }
+    }
+
+    #[test]
+    fn file_search_cancels_before_start_and_during_a_query() {
+        use std::cell::Cell;
+        let dir = TestDir::new();
+        let cancelled = search_files(&dir.0.join("missing"), "needle", false, || true).unwrap();
+        assert!(cancelled.paths.is_empty() && cancelled.truncated);
+        let empty = search_files(&dir.0, "", false, || false).unwrap();
+        assert!(empty.paths.is_empty() && !empty.truncated);
+        for repository in [false, true] {
+            if repository {
+                dir.init();
+            }
+            for index in 0..100 {
+                dir.write(&format!("needle-{index:03}.rs"), "");
+            }
+            let calls = Cell::new(0);
+            let partial = search_files(&dir.0, "needle", false, || {
+                calls.set(calls.get() + 1);
+                calls.get() >= 25
+            })
+            .unwrap();
+            assert!(partial.truncated);
+            assert!(partial.paths.len() < 100);
+            assert_eq!(calls.get(), 25);
+        }
+    }
+
+    #[test]
+    fn file_search_git_reader_stops_at_byte_and_time_budgets() {
+        let dir = TestDir::new();
+        dir.init();
+        dir.write("one.rs", "");
+        dir.write("two.rs", "");
+        let args = ["ls-files", "-co", "--exclude-standard", "-z"];
+        let capped =
+            git_until(&dir.0, args, 3, Instant::now() + SEARCH_TIMEOUT, &|| false).unwrap();
+        assert_eq!(capped.bytes.len(), 3);
+        assert!(capped.truncated && !capped.interrupted);
+        let timed_out = git_until(&dir.0, args, 100, Instant::now(), &|| false).unwrap();
+        assert!(timed_out.bytes.is_empty());
+        assert!(timed_out.truncated && timed_out.interrupted);
     }
 
     #[test]
