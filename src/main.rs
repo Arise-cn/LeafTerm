@@ -24,9 +24,14 @@ fn main() -> anyhow::Result<()> {
     for arg in std::env::args().skip(1) {
         match arg.as_str() {
             "--fresh" => restore = false,
+            "--version" | "-V" => {
+                println!("LeafTerm {}", env!("CARGO_PKG_VERSION"));
+                return Ok(());
+            }
             "--help" | "-h" => {
                 println!(
-                    "LeafTerm — GPU terminal with Git-aware file tree\n\nUsage: leafterm [--fresh] [directory]\n\n--fresh  Start a new layout instead of restoring saved windows\n\n⌘D / ⌘⇧D: Split right / down   ⌘N / ⌘T: New window   ⌘W: Close pane\n⌘⌥Arrows: Focus pane   ⌘⇧Enter: Zoom pane   F2: Rename window\n⌘B: Show / hide sidebar   ⌘P: Search files   ⌘E: Toggle Files / Changes   ⌘R: Refresh Git   ⌘C / ⌘V: Copy / paste"
+                    "LeafTerm {} — GPU terminal with Git-aware file tree\n\nUsage: leafterm [options] [directory]\n\nOptions:\n    --fresh        Start a new layout instead of restoring saved windows\n    -h, --help     Show this help\n    -V, --version  Show the version\n\n⌘D / ⌘⇧D: Split right / down   ⌘N / ⌘T: New window   ⌘W: Close pane\n⌘⌥Arrows: Focus pane   ⌘⇧Enter: Zoom pane   F2: Rename window\n⌘B: Show / hide sidebar   ⌘P: Search files   ⌘E: Toggle Files / Changes   ⌘R: Refresh Git   ⌘C / ⌘V: Copy / paste",
+                    env!("CARGO_PKG_VERSION")
                 );
                 return Ok(());
             }

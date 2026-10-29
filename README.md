@@ -1,183 +1,172 @@
+<div align="center">
+
+<img src="assets/LeafTerm.png" width="120" alt="LeafTerm app icon: a leaf and a terminal prompt" />
+
 # LeafTerm
 
-面向 AI 命令行工作流的 Rust 桌面终端：在终端里运行 Codex CLI、Claude Code 等工具，同时从侧栏查看当前分支、文件树和实际代码变更。
+### Your agent’s terminal. Your code, in view.
 
-**当前为开发预览版。** 低内存是设计目标，不是已验证的性能承诺；GPU 绘制也不等于不占用内存。终端解析、文字排版、文件读取等仍在 CPU 上进行，界面由 GPU 绘制。在 Apple Silicon 上，CPU 和 GPU 共用统一内存。
+Keep the workflow. Skip the extra IDE.
 
-## 当前范围
+<p>
+  <a href="README.md"><img src="https://img.shields.io/badge/English-6DDEAA?style=for-the-badge&amp;logoColor=0C1114" alt="Switch to English" /></a>
+  <a href="README.zh-CN.md"><img src="https://img.shields.io/badge/%E7%AE%80%E4%BD%93%E4%B8%AD%E6%96%87-253136?style=for-the-badge" alt="切换到简体中文" /></a>
+</p>
 
-- 真实本地 Shell／PTY，彩色输出、Unicode、选择复制、粘贴和滚动历史。
-- 多个原生窗口、左右／上下分屏、拖动分隔线、切换焦点和临时最大化分屏。没有标签栏、品牌横幅、分屏工具栏或常驻状态栏。
-- Git 分支显示，包括未产生提交的新分支和 detached HEAD；识别 Git worktree。
-- **Changes** 列表单独显示冲突文件，支持逐段对比和解决；其他文件区分未暂存、已暂存和未跟踪，点击查看只读 Diff。
-- **Files** 文件树按需展开，显示文件变更标记；可切换隐藏文件，并按文件名或相对路径搜索未展开目录中的文件。
-- 侧栏跟随当前终端目录，或固定在某个项目。提供手动 Git 刷新。
-- **Files** 中点击 UTF-8 文本文件可直接编辑，自动语法高亮，`⌘S` 保存；**Changes** 中查看只读 Diff。右键文件条目复制路径。
-- 关闭终端和退出应用前确认；保存窗口、分屏布局和工作目录。
+<p>
+  <img src="https://img.shields.io/badge/version-v0.1.0-6DDEAA?style=flat-square" alt="Version 0.1.0" />
+  <img src="https://img.shields.io/badge/Rust-native-DEA584?style=flat-square&amp;logo=rust&amp;logoColor=white" alt="Built with Rust" />
+  <img src="https://img.shields.io/badge/Metal-GPU_rendered-6DDEAA?style=flat-square" alt="Metal GPU rendering" />
+  <img src="https://img.shields.io/badge/macOS-Apple_Silicon-9AAEB8?style=flat-square&amp;logo=apple&amp;logoColor=white" alt="Developed on macOS Apple Silicon" />
+  <img src="https://img.shields.io/badge/Windows-in_development-7CB7DB?style=flat-square" alt="Windows version in development" />
+  <img src="https://img.shields.io/badge/status-preview-E7BE6F?style=flat-square" alt="Development preview" />
+</p>
 
-Git 侧栏默认只读取仓库；冲突编辑器中的 **Mark resolved** 会显式暂存当前已保存的文件。提交、继续合并／变基、重置和切换分支等操作仍由你在终端完成。
+[Quick start](#quick-start) · [Features](#features) · [Shortcuts](#shortcuts) · [User guide](docs/guide.md) · [Report an issue](https://github.com/Arise-cn/LeafTerm/issues)
 
-## 运行
+</div>
 
-当前渲染后端固定为 **macOS Metal**，不包含 Windows／Linux 的可运行后端。需要 Rust 稳定工具链、Xcode Command Line Tools 和 Git。当前主要开发环境是 Apple Silicon Mac；其他机器的兼容性仍需验证。
+---
 
-在仓库目录中运行：
+Your AI agent is already writing code in the terminal. But checking a branch, reviewing its changes, tweaking a config, or resolving a conflict can still mean opening a full IDE.
+
+**LeafTerm brings those everyday tasks into your terminal workspace.** A file tree, Git diffs, a small editor, and conflict resolution stay close at hand. Open the sidebar when you need context; press `⌘B` to give the space back to your terminal. Built in Rust with GPU rendering, LeafTerm is designed to keep resource use modest and help you work without an extra IDE running alongside your agent.
+
+<p align="center">
+  <img src="docs/images/workflow.gif" width="1100" alt="Illustrated LeafTerm workflow: AI terminal, Git file tree, editing, conflict resolution, and hiding the sidebar" />
+  <br />
+  <sub>Workflow illustration, not a screen recording. Fictional project and example content. <a href="docs/images/workflow-poster.png">Static preview</a>.</sub>
+</p>
+
+> **macOS development preview · Windows in development**
+> The current build runs on macOS using Metal and is developed and tested primarily on Apple Silicon. Windows is not available yet. Low memory use is a design goal; no comparative benchmarks have been published. GPU rendering still uses system memory.
+
+<a id="features"></a>
+
+## A terminal with your project in view
+
+| | What you can do |
+| :--- | :--- |
+| **Review your agent’s changes** | See the current branch, file status, and diffs in the sidebar. Distinguish staged, unstaged, untracked, and conflicted files. Git worktrees are supported. |
+| **Find a file quickly** | Press `⌘P` to search filenames and relative paths, including folders you haven’t expanded. Browse the file tree with Git change markers. |
+| **Make that small edit** | Open a text file, edit with syntax highlighting, save with `⌘S`, and undo with `⌘Z`. External change detection helps protect edits your agent has just written. |
+| **Resolve conflicts visually** | Compare Current and Incoming, keep either side or both, and adjust the result by hand. Undo a choice, save the result, then explicitly mark the file resolved. |
+| **Arrange your workspace** | Use shortcuts for new windows, horizontal or vertical splits, pane focus, and pane zoom. Drag dividers to adjust the layout. |
+| **Keep the space for your terminal** | Toggle the sidebar with `⌘B`; LeafTerm remembers your choice. No persistent tab strip or toolbar. The app icon and ink-and-mint palette carry the visual identity. |
+
+Underneath it all: a real local shell and PTY, ANSI 16-color / 256-color / truecolor output, Unicode, text selection, copy and paste, and scrollback.
+
+<a id="quick-start"></a>
+
+## Quick start
+
+You’ll need **macOS, a stable Rust toolchain, Xcode Command Line Tools, and Git**. Build from source for now.
+
+```sh
+git clone https://github.com/Arise-cn/LeafTerm.git
+cd LeafTerm
+cargo run --release -- --fresh .
+```
+
+To open your own project:
 
 ```sh
 cargo run --release -- --fresh /path/to/your/project
 ```
 
-使用 LeafTerm 仓库本身：
+Inside LeafTerm, run the tools you already have installed:
 
 ```sh
-cargo run --release -- --fresh .
+codex
+# or
+claude
 ```
 
-不指定目录时，尝试恢复上次保存的布局：
+LeafTerm uses your local shell. It does not bundle an AI CLI, model, or sign-in service. Running `cargo run --release` without a directory attempts to restore your previous window layout and working directories.
 
-```sh
-cargo run --release
-```
-
-`--fresh` 跳过布局恢复；传入目录也会从该目录建立新布局。进入终端后可使用已有的 `codex`、`claude`、`git` 等命令。LeafTerm 不附带这些工具，也不代为登录。
-
-如果 Rust 安装在默认位置但尚未加入 PATH，可将上述命令中的 `cargo` 替换为 `~/.cargo/bin/cargo`。
-
-## AI 命令行的颜色
-
-终端会将程序输出的 ANSI 16 色、256 色和 RGB 真彩色直接交给 GPU 显示；这与文件编辑器的语法高亮独立。新建 Shell 会声明 `TERM=xterm-256color`、`COLORTERM=truecolor`，并清除从 LeafTerm 启动进程继承的 `NO_COLOR`，避免由构建／自动化工具启动应用时误关彩色输出。Shell 启动脚本或单条命令中主动设置 `NO_COLOR` 仍然有效。
-
-更新不会改变已有 Shell／AI 进程的环境。旧会话如需恢复颜色，先正常退出 AI CLI，在 Shell 中运行 `unset NO_COLOR`，再启动 CLI；也可用 `env -u NO_COLOR codex` 或 `env -u NO_COLOR claude` 单次启动。普通回答正文是否上色仍由 CLI 自身主题决定，彩色主要体现在代码、命令、Diff 和状态信息。
-
-## `cd` 目录补全
-
-在 zsh 中输入 `cd `（末尾有空格），命令下方会自动列出目录。继续输入路径可筛选候选：
-
-- `Tab` 进入候选菜单，再按 `Tab` 切换。
-- 菜单中按 `Enter` 确认候选，再按一次 `Enter` 执行 `cd`；只有一个候选时，`Tab` 直接补齐，回车即可执行。
-- `Ctrl G` 取消候选菜单，继续编辑命令。
-
-补全通过当前 Shell 的行编辑器工作，只列出目录，支持中文和含空格的路径。它不会接管 Codex／Claude Code 等运行中程序的按键。LeafTerm 保留原有 zsh 启动配置，在新建的 Shell 会话中加载补全；不会改写 `~/.zshrc`。其他 Shell 继续使用自身的补全行为，可用 `LEAFTERM_SHELL_INTEGRATION=0` 禁用 LeafTerm 的 zsh 集成。
-
-## 快捷键与操作
-
-| 操作 | 快捷键／入口 |
-| --- | --- |
-| 新建窗口 | `⌘ N`（`⌘ T` 兼容） |
-| 左右分屏 | `⌘ D` |
-| 上下分屏 | `⌘ ⇧ D` |
-| 切换分屏焦点 | `⌘ ⌥ ←/↑` 上一个，`⌘ ⌥ →/↓` 下一个 |
-| 最大化当前分屏／恢复 | `⌘ ⇧ Enter` |
-| 调整分屏比例 | 拖动分隔线 |
-| 关闭文件／当前分屏 | `⌘ W`；有未保存内容或运行会话时确认 |
-| 重命名窗口 | `F2` |
-| 显示／隐藏侧栏 | `⌘ B`；隐藏后终端铺满可用宽度 |
-| 切换 Changes／Files | `⌘ E` |
-| 搜索文件名／路径 | `⌘ P`，或点击 Files 搜索框；`↑` / `↓` 选择，`Enter` 打开，`Esc` 清空并退出搜索 |
-| 手动刷新 Git | `⌘ R` 或侧栏刷新按钮 |
-| 复制／粘贴 | `⌘ C` / `⌘ V` |
-| 编辑文件：保存／全选／剪切 | `⌘ S` / `⌘ A` / `⌘ X` |
-| 编辑文件：撤销／重做 | `⌘ Z` / `⌘ ⇧ Z` |
-| 搜索终端历史 | `⌘ F`，输入文字并按 `Enter` |
-| 搜索上一个／下一个匹配 | `⌘ G` / `⌘ ⇧ G`，在保留的历史中循环查找 |
-| 放大／缩小字体 | `⌘ +` / `⌘ -` |
-| 恢复默认字号 | `⌘ 0` |
-| 关闭文件预览／Diff／取消弹窗 | `Esc` |
-| 滚动编辑器／只读预览／Diff | 滚轮；只读视图也可用 `↑` / `↓` |
-| 横向滚动编辑器／只读预览／Diff | `Shift` + 滚轮；只读视图也可用 `←` / `→` |
-| 复制文件路径 | 右键侧栏文件条目 |
-| 退出 | `⌘ Q`，确认后退出 |
-
-`cargo run --release -- --help` 也会显示启动参数和主要快捷键。原型功能仍在完善；交互以当前代码和实际运行结果为准。
-
-## 文件树搜索
-
-在 **Files** 顶部输入文件名或相对路径，或按 `⌘P` 直接聚焦搜索。支持中文和不区分大小写的子串匹配，范围包含未展开的子目录。结果显示文件名、所在目录和 Git 变更标记；点击或回车即可打开编辑，未保存的文件仍会先提示处理。点击 `×` 清空筛选，`Esc` 清空并把键盘焦点交回工作区。
-
-Git 项目搜索已跟踪文件和未忽略的新文件，遵循 `.gitignore`；隐藏文件开关同样适用。搜索只匹配名称和路径，不搜索文件内容。后台防抖 150ms、取消旧查询，不保留常驻项目索引；最多显示 200 项，扫描最多 5 万项、约 4 MiB 路径数据或 2 秒，达到边界会标明部分结果，可继续输入更精确的路径。不会遍历 `.git` 或沿目录符号链接搜索。
-
-## 轻量文件编辑
-
-在 **Files** 点击文件后直接编辑；鼠标定位和拖动选择，方向键移动，Shift 扩展选择。`⌘S` 保存，`⌘Z` 撤销，`⌘⇧Z` 重做，`Esc` 返回终端。有未保存修改时，切换文件、关闭编辑器／窗口或通过 `⌘Q` 退出会先提示保存、丢弃或取消。
-
-编辑仅支持最多 256 KiB 的 UTF-8 常规文件；保留 UTF-8 BOM、CRLF 换行和文件权限。二进制、非 UTF-8、大文件和符号链接以只读方式展示。使用同目录临时文件原子保存；保存前发现文件已被 AI 工具或其他程序修改时，会拒绝覆盖并保留当前编辑。
-
-每个编辑器最多保留 64 步、总计约 4 MiB 的撤销／重做记录。没有引入语言服务器、插件宿主或大型 IDE 编辑器。未保存内容以私有恢复草稿保存；macOS Dock 的退出和系统退出不能通过 winit 弹窗拦截，下一次启动会尝试恢复草稿。
-
-品牌通过 Dock／Finder 应用图标和工作区的深墨色、薄荷绿焦点线体现。图标源在 `assets/LeafTerm.png`，打包时生成原生 ICNS；工作区不放常驻 Logo 或标语。
-
-## 语法高亮
-
-文件编辑器与冲突对比中的双方代码、结果区会按文件名识别语言并着色。支持 Rust、JavaScript、JSON、YAML、Python、Shell、Markdown、HTML／CSS 等内置语法，另有轻量 TOML 语法。TypeScript 暂用 JavaScript 语法高亮，状态栏会显示 `TypeScript · JS grammar`；未知格式和普通文本保持原色。这是语法着色，不提供类型检查或语义诊断。
-
-高亮在按需启动的后台线程计算，连续输入防抖 50ms 并取消过期结果。编辑从变化前的行状态检查点续算，不会因移动光标、滚动或每次重绘重新分析全文。每个可见行共用一个文字排版缓冲，行内附加颜色，保持中文、组合字符和 Tab 的位置；冲突双方从各自的上下文解析，`⌘Z`／`⌘⇧Z` 后会重新着色。
-
-文件仍受 256 KiB 编辑上限约束；高亮最多保存 16K 个颜色区间、128 个行状态检查点。遇到超过 4 KiB 的长行、区间数量上限或约 150ms 的行间计算预算，会让剩余内容显示普通文本，并标记 `Partial highlighting`。预算不包含首次语法表加载，也不是单条正则的硬超时。关闭编辑器释放该文件的缓存和工作线程；已加载的语法表在进程内共享复用，不扫描项目、不启动语言服务器。
-
-## 解决合并冲突
-
-在 **Changes → CONFLICTS** 点击文件，或在文件树／搜索中打开冲突文件，即可进入轻量冲突编辑器。上方左右显示当前冲突段的 **CURRENT** 与 **INCOMING**，并保留 Git 标记中的分支标签；用箭头切换冲突段。变基时双方的含义以 Git 生成的标签为准。
-
-- **Accept Current**：保留左侧；**Accept Incoming**：保留右侧。
-- **Accept Both**：按当前、传入的顺序保留双方内容；需要调整顺序或去重时，直接编辑下方结果区。
-- 每次选择都可以 `⌘Z` 撤销；结果区仍支持原有的选择、输入和保存操作。上方比较区和下方结果区分别滚动，`Shift` + 滚轮横向查看长行。
-- 所有冲突标记解决后，`⌘S` 保存；再点击 **Mark resolved**，只暂存这个文件。不会自动提交或继续合并，其他文件保持原状。
-
-支持普通文本冲突、add/add 及 diff3／zdiff3 标记；编辑仍受 256 KiB UTF-8 限制。残缺标记会提示手动修正，未解决时不允许保存结果，未保存的编辑保留在恢复草稿中。暂存前会再次核对磁盘内容和 Git 冲突条目。删除／修改、二进制及自定义短标记（少于 7 字符）的冲突需在终端处理。
-
-## 布局恢复与资源边界
-
-布局文件位于：
-
-```text
-~/Library/Application Support/LeafTerm/session.json
-```
-
-恢复的是**窗口、分屏布局、字号和工作目录**。旧版本保存的每个标签会迁移为独立窗口。重新打开时会启动新的 Shell，**不会恢复之前运行的 Codex／Claude Code 进程或未结束的命令**。退出确认会明确提示运行中的程序将停止。
-
-侧栏的显示／隐藏状态会在切换时立即保存，下次启动继续沿用，包括使用 `--fresh` 或指定新目录时。切换目录不会自动打开侧栏；同一次运行中隐藏再显示时，保留原来的 Files／Changes 视图和目录展开状态。
-
-当前设置了单窗口最多 32 个终端分屏，每个终端保留 3000 行滚动历史；单次粘贴最多约 128 KiB，OSC 控制消息最多 16 KiB。文件树最多同时展开 31 个目录，单层目录和可见树预览最多 4096 项；Git 状态输出最多读取 1 MiB／8192 项变更，单个 Diff 或文件预览约 256 KiB。大型结果需要使用 Shell 中的 Git 或文件工具进一步查看。
-
-这些限制用于控制常见数据增长，并不构成整个进程的硬内存上限。字体、GPU 驱动、终端单元格和依赖库仍会分配内存。性能验证应分别记录 LeafTerm、Shell 与 AI CLI 进程的占用，并包含长时间输出、大仓库刷新、分屏反复打开／关闭等场景。
-
-## 构建 macOS 应用包
+<details>
+<summary><strong>Build a macOS app with a Dock icon</strong></summary>
 
 ```sh
 ./scripts/bundle.sh
 open dist/LeafTerm.app
 ```
 
-脚本会运行 `cargo build --release --locked`，然后生成仓库内的 `dist/LeafTerm.app`。不会安装到 `/Applications`，也不会上传或发布。已存在的应用包默认保留；需要重建时显式传入：
+The script creates `dist/LeafTerm.app` inside the repository. To replace an existing bundle, use `./scripts/bundle.sh --force`.
+
+This is an ad-hoc signed bundle for local development. It is not signed with a developer certificate or notarized. See [building and launching](docs/guide.md#getting-started) for all launch and packaging options.
+
+</details>
+
+## From agent output to reviewed changes
+
+**1. Keep your agent working in the terminal.** Continue in your familiar CLI. Let the sidebar follow the current directory, or pin it to a project.
+
+**2. Open what you need in Files.** Press `⌘P`, enter a filename, and hit Return. Tweak a config, check the code, save, and get back to the terminal.
+
+**3. Review the result in Changes.** Inspect the actual diff. For a text conflict, choose Current, Incoming, or Both for each section, then check the final result.
+
+The Git sidebar is normally read-only. **Mark resolved** in the conflict editor stages the current saved file. You run commits and continue merges or rebases yourself in the terminal.
+
+<a id="shortcuts"></a>
+
+## Fewer clicks. More room.
+
+| Shortcut | Action |
+| :--- | :--- |
+| `⌘ B` | Show / hide the sidebar |
+| `⌘ P` | Search files |
+| `⌘ E` | Switch between Files and Changes |
+| `⌘ D` / `⌘ ⇧ D` | Split right / split down |
+| `⌘ ⌥ ←` / `⌘ ⌥ →` | Focus the previous / next pane |
+| `⌘ ⇧ Enter` | Zoom the current pane / restore layout |
+| `⌘ N` | New window |
+| `⌘ S` | Save the file |
+| `⌘ Z` / `⌘ ⇧ Z` | Undo / redo edits and conflict choices |
+| `⌘ F` | Search terminal history |
+
+There’s also directory completion for `cd` in zsh, font size control, and layout restoration. See the [full shortcut list](docs/guide.md#shortcuts) and [user guide](docs/guide.md).
+
+## Designed to leave room for your workflow
+
+- **Render with the GPU.** `winit` handles native windows and input; `wgpu` / Metal and `glyphon` draw the interface and text.
+- **Load project context on demand.** Expand folders as needed. File searches run in the background, cancel outdated queries, and keep no persistent project-wide index.
+- **Keep editing focused.** Syntax highlighting runs in the background and updates incrementally, without starting a language server or plugin host.
+- **Bound growing data.** Scrollback, editable file sizes, search results, and undo history have explicit limits. Use your existing command-line tools for larger tasks.
+
+The terminal core uses `alacritty_terminal`, local processes run through `portable-pty`, and `syntect` supplies syntax highlighting. Parsing, text layout, and file handling still require CPU work. See the [resource limits](docs/guide.md#resource-limits) for details.
+
+<details>
+<summary><strong>Current support and known limitations</strong></summary>
+
+- The runnable build currently supports macOS Metal only. **Windows support is in development** and is not available yet. Linux is not supported; compatibility with other Macs still needs testing.
+- Editing supports **regular UTF-8 files up to 256 KiB**. Larger files, binary files, non-UTF-8 files, and symlinks are presented read-only.
+- TypeScript currently uses the JavaScript highlighting grammar. There is no type checking, language server, or semantic diagnostics.
+- The conflict UI supports common text conflicts, including diff3 / zdiff3. Modify/delete, binary, and other unsupported conflicts must be handled in the terminal.
+- Restoring a layout starts new shells. It **does not resume previous AI processes or commands**.
+- Chinese input method composition, prolonged stress testing, and complete AI CLI workflows are still being validated. Full Kitty keyboard protocol support, terminal image protocols, and screen reader semantics are not available yet.
+
+More details: [Editing](docs/guide.md#editing) · [Highlighting](docs/guide.md#highlighting) · [Conflicts](docs/guide.md#merge-conflicts) · [Layout restoration](docs/guide.md#session-restore)
+
+</details>
+
+## Help shape LeafTerm
+
+Found something that gets in the way? [Open an issue](https://github.com/Arise-cn/LeafTerm/issues). Improvements are welcome, too. For bug reports, include your macOS version, chip, shell and AI CLI versions, steps to reproduce, and screenshots or logs with sensitive information removed.
+
+Local development checks:
 
 ```sh
-./scripts/bundle.sh --force
-```
-
-只打包已经编译好的 release 可执行文件：
-
-```sh
-./scripts/bundle.sh --no-build
-```
-
-应用包只做本机开发使用的 ad-hoc 签名，尚未使用开发者证书签名或公证，不应当作正式发布包分发。
-
-## 开发与验证
-
-```sh
-cargo test --locked
 cargo fmt --check
+cargo test --locked
 cargo clippy --all-targets --locked -- -D warnings
 ```
 
-隔离窗口测试时，可设置绝对路径 `LEAFTERM_SESSION_PATH=/path/to/test-state/session.json`。布局和同目录的 `recovery.json` 使用该测试位置，避免与日常会话混用。
+[User guide](docs/guide.md) · [Color troubleshooting](docs/guide.md#terminal-colors) · [Development and testing](docs/guide.md#development)
 
-核心组成：`winit` 处理窗口和输入，`wgpu` 使用 Metal 绘制，`glyphon` 管理文字绘制，`alacritty_terminal` 解析终端控制序列，`portable-pty` 管理本地进程。
+---
 
-终端内核固定在 Alacritty 官方提交 [`54214706`](https://github.com/alacritty/alacritty/commit/542147067dd016fc5f49120ef0ba605a98a4e3a7)，包含零宽字符存储上限和 Kitty 键盘模式栈修复。这是固定的开发版本，升级时应重新运行兼容性与资源测试。
-
-本机 88 项自动化测试通过（另有 1 项手动 release 基准），覆盖真实 PTY、输入／窗口尺寸、macOS 空格键、cd 目录菜单与确认执行、Shell 启动配置保留、Git 状态与 worktree、文件预览与截断、二进制／符号链接处理、中文字体、异常控制消息、子进程终止和回收，以及编辑器、保存冲突、恢复草稿、旧布局迁移、标题读取时保留终端待重绘状态、文件搜索范围、取消、资源边界和输入编辑，以及冲突标记解析、逐段替换与撤销、真实 Git 冲突的单文件暂存和特殊冲突拒绝，以及语法高亮的增量更新、资源边界、冲突上下文和 Unicode 行内颜色映射。
-
-窗口实测包含分屏／拖动、多窗口、关闭一个窗口后其他窗口继续运行、目录跟随、文件树、只读 Diff 自动刷新、终端搜索和 Diff 粘贴隔离。文件搜索实测包含中文匹配、未展开子目录、Git 忽略规则、隐藏项切换、鼠标／键盘打开、清空筛选及编辑器快捷键焦点隔离。冲突实测包含真实 diff3 合并的前后段导航、三种保留方式、撤销、手动修改、未解决时拦截保存，以及解决后只暂存当前文件、保留其他未暂存修改。语法高亮窗口实测包含 JSON／TOML／Rust、中文与 Tab、编辑后重新着色、冲突双方与结果区、保留双方及撤销恢复。编辑实测包含中文内容、`⌘S` 写入磁盘、未保存内容的保存／丢弃／取消提示，以及隔离测试进程异常退出后恢复未保存内容。
-
-Codex CLI／Claude Code 的完整交互流程、中文输入法组合、长时间压力和其他 Mac 仍需继续验证；当前不支持完整 Kitty 键盘协议、终端图片协议或屏幕阅读器语义。
+<p align="center">
+  <strong>LeafTerm</strong><br />
+  <sub>Your code, in view.</sub>
+</p>
