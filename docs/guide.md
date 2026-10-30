@@ -10,7 +10,19 @@ This guide covers the current development preview: controls, file protection, an
 
 ## Getting started
 
-The current renderer uses **Metal on macOS**. Windows support is in development and is not yet available; there is no runnable Linux backend. You need a stable Rust toolchain, Xcode Command Line Tools, and Git. Development primarily takes place on Apple Silicon Macs; compatibility with other machines still needs verification.
+The current renderer uses **Metal on macOS**. Windows support is in development and is not yet available; there is no runnable Linux backend. Development primarily takes place on Apple Silicon Macs; compatibility with other machines still needs verification.
+
+### Download and install
+
+1. [Download LeafTerm v0.1.0 for macOS Apple Silicon](https://github.com/Arise-cn/LeafTerm/releases/download/v0.1.0/LeafTerm-0.1.0-macos-arm64.zip) and unzip it.
+2. Move `LeafTerm.app` to **Applications** (`/Applications`).
+3. Open the app. If macOS blocks it, follow the [first launch instructions](#macos-first-launch).
+
+This is an Apple Silicon development preview without Apple Developer ID signing or Apple notarization. The app does not require a source checkout or Rust. The Git sidebar requires a working local Git installation; install AI CLI tools separately. See the [release notes](https://github.com/Arise-cn/LeafTerm/releases/tag/v0.1.0) for this download.
+
+### Build and run from source
+
+Source builds require a stable Rust toolchain, Xcode Command Line Tools, and Git.
 
 From the repository directory, open a project:
 
@@ -53,7 +65,21 @@ If you have already built the release executable, skip compilation:
 ./scripts/bundle.sh --no-build
 ```
 
-The bundle uses an ad-hoc signature for local development. It has no developer certificate signature or notarization and is not intended for distribution as an official release. Replacing the bundle does not update running shells or AI processes; the next app launch uses the new version.
+The bundle uses an ad-hoc signature for local development. It is not signed with Apple Developer ID or notarized by Apple. Replacing the bundle does not update running shells or AI processes; the next app launch uses the new version.
+
+<a id="macos-first-launch"></a>
+
+### First launch on macOS
+
+If macOS says LeafTerm is “damaged” or that the developer cannot be verified on first launch, and you trust the app's source, move `LeafTerm.app` to `/Applications`, open the system **Terminal** app, and run:
+
+```sh
+sudo xattr -cr "/Applications/LeafTerm.app"
+```
+
+Enter your administrator password and press Return; password characters are not displayed as you type. When the command finishes, reopen LeafTerm. If the app is stored elsewhere, replace the quoted path with its actual location.
+
+This command recursively clears the app's extended attributes, including quarantine. It does not repair actual file corruption; if the app still fails to open, download it again.
 
 <a id="shortcuts"></a>
 

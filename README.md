@@ -22,6 +22,12 @@ Keep the workflow. Skip the extra IDE.
   <img src="https://img.shields.io/badge/status-preview-E7BE6F?style=flat-square" alt="Development preview" />
 </p>
 
+<p>
+  <a href="https://github.com/Arise-cn/LeafTerm/releases/download/v0.1.0/LeafTerm-0.1.0-macos-arm64.zip"><img src="https://img.shields.io/badge/Download-macOS_Apple_Silicon-6DDEAA?style=for-the-badge&amp;logo=apple&amp;logoColor=0C1114" alt="Download LeafTerm for macOS Apple Silicon" /></a>
+  <br />
+  <sub>v0.1.0 preview · ZIP · <a href="https://github.com/Arise-cn/LeafTerm/releases/tag/v0.1.0">Release notes</a></sub>
+</p>
+
 [Quick start](#quick-start) · [Features](#features) · [Shortcuts](#shortcuts) · [User guide](docs/guide.md) · [Report an issue](https://github.com/Arise-cn/LeafTerm/issues)
 
 </div>
@@ -60,7 +66,26 @@ Underneath it all: a real local shell and PTY, ANSI 16-color / 256-color / truec
 
 ## Quick start
 
-You’ll need **macOS, a stable Rust toolchain, Xcode Command Line Tools, and Git**. Build from source for now.
+1. [Download LeafTerm v0.1.0 for macOS Apple Silicon](https://github.com/Arise-cn/LeafTerm/releases/download/v0.1.0/LeafTerm-0.1.0-macos-arm64.zip) and unzip it.
+2. Drag `LeafTerm.app` into **Applications** (`/Applications`).
+3. Open LeafTerm. If macOS blocks the app, follow the [first launch instructions](#macos-first-launch) below.
+
+The download is an **Apple Silicon development preview** without Apple Developer ID signing or Apple notarization. You do not need to clone the repository or install Rust to use it. The Git sidebar requires a working local Git installation.
+
+Inside LeafTerm, run the tools you already have installed:
+
+```sh
+codex
+# or
+claude
+```
+
+LeafTerm uses your local shell. It does not bundle an AI CLI, model, or sign-in service.
+
+<details>
+<summary><strong>Build from source (optional)</strong></summary>
+
+Source builds require **macOS, a stable Rust toolchain, Xcode Command Line Tools, and Git**.
 
 ```sh
 git clone https://github.com/Arise-cn/LeafTerm.git
@@ -74,18 +99,7 @@ To open your own project:
 cargo run --release -- --fresh /path/to/your/project
 ```
 
-Inside LeafTerm, run the tools you already have installed:
-
-```sh
-codex
-# or
-claude
-```
-
-LeafTerm uses your local shell. It does not bundle an AI CLI, model, or sign-in service. Running `cargo run --release` without a directory attempts to restore your previous window layout and working directories.
-
-<details>
-<summary><strong>Build a macOS app with a Dock icon</strong></summary>
+Running `cargo run --release` without a directory attempts to restore your previous window layout and working directories. To build a macOS app with a Dock icon:
 
 ```sh
 ./scripts/bundle.sh
@@ -94,9 +108,23 @@ open dist/LeafTerm.app
 
 The script creates `dist/LeafTerm.app` inside the repository. To replace an existing bundle, use `./scripts/bundle.sh --force`.
 
-This is an ad-hoc signed bundle for local development. It is not signed with a developer certificate or notarized. See [building and launching](docs/guide.md#getting-started) for all launch and packaging options.
+This is an ad-hoc signed bundle for local development. It is not signed with Apple Developer ID or notarized by Apple. See [building and launching](docs/guide.md#getting-started) for all launch and packaging options.
 
 </details>
+
+<a id="macos-first-launch"></a>
+
+### First launch on macOS
+
+The current app has an ad-hoc signature, but no Apple Developer ID signature or Apple notarization. If macOS says the app is “damaged” or that the developer cannot be verified on first launch, and you trust the app's source, move `LeafTerm.app` to `/Applications`, open the system **Terminal** app, and run:
+
+```sh
+sudo xattr -cr "/Applications/LeafTerm.app"
+```
+
+Enter your administrator password and press Return; password characters are not displayed as you type. When the command finishes, reopen LeafTerm. If the app is stored elsewhere, replace the quoted path with its actual location.
+
+This command recursively clears the app's extended attributes, including quarantine. It does not repair actual file corruption; if the app still fails to open, download it again.
 
 ## From agent output to reviewed changes
 
@@ -163,6 +191,8 @@ cargo clippy --all-targets --locked -- -D warnings
 ```
 
 [User guide](docs/guide.md) · [Color troubleshooting](docs/guide.md#terminal-colors) · [Development and testing](docs/guide.md#development)
+
+LeafTerm is available under the [MIT License](LICENSE). Third-party dependencies retain their own licenses.
 
 ---
 

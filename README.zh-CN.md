@@ -22,6 +22,12 @@ Your agent’s terminal. Your code, in view.
   <img src="https://img.shields.io/badge/status-preview-E7BE6F?style=flat-square" alt="Development preview" />
 </p>
 
+<p>
+  <a href="https://github.com/Arise-cn/LeafTerm/releases/download/v0.1.0/LeafTerm-0.1.0-macos-arm64.zip"><img src="https://img.shields.io/badge/%E4%B8%8B%E8%BD%BD-macOS_Apple_Silicon-6DDEAA?style=for-the-badge&amp;logo=apple&amp;logoColor=0C1114" alt="下载适用于 macOS Apple Silicon 的 LeafTerm" /></a>
+  <br />
+  <sub>v0.1.0 预览版 · ZIP · <a href="https://github.com/Arise-cn/LeafTerm/releases/tag/v0.1.0">版本说明</a></sub>
+</p>
+
 [快速开始](#quick-start) · [功能一览](#features) · [常用快捷键](#shortcuts) · [完整指南](docs/guide.zh-CN.md) · [反馈问题](https://github.com/Arise-cn/LeafTerm/issues)
 
 </div>
@@ -60,7 +66,26 @@ AI 已经在终端里写代码，查看分支、检查改动、调整配置、�
 
 ## 快速开始
 
-需要 **macOS、Rust 稳定工具链、Xcode Command Line Tools 和 Git**。目前从源码构建使用。
+1. [下载 LeafTerm v0.1.0 macOS Apple Silicon 版](https://github.com/Arise-cn/LeafTerm/releases/download/v0.1.0/LeafTerm-0.1.0-macos-arm64.zip)，解压 ZIP。
+2. 将 `LeafTerm.app` 拖入**应用程序**文件夹（`/Applications`）。
+3. 打开 LeafTerm。如果 macOS 拦截启动，请按下方[首次打开说明](#macos-first-launch)处理。
+
+下载包是 **Apple Silicon 开发预览版**，尚未使用 Apple Developer ID 证书签名或经过 Apple 公证。使用应用不需要 clone 仓库或安装 Rust；Git 侧栏需要本机有可用的 Git。
+
+进入 LeafTerm 后，照常运行已经安装的工具：
+
+```sh
+codex
+# 或
+claude
+```
+
+LeafTerm 使用本地 Shell，不附带 AI CLI、模型或账号登录。
+
+<details>
+<summary><strong>从源码构建（可选）</strong></summary>
+
+源码构建需要 **macOS、Rust 稳定工具链、Xcode Command Line Tools 和 Git**。
 
 ```sh
 git clone https://github.com/Arise-cn/LeafTerm.git
@@ -74,18 +99,7 @@ cargo run --release -- --fresh .
 cargo run --release -- --fresh /path/to/your/project
 ```
 
-进入 LeafTerm 后，照常运行已经安装的工具：
-
-```sh
-codex
-# 或
-claude
-```
-
-LeafTerm 使用本地 Shell，不附带 AI CLI、模型或账号登录。只运行 `cargo run --release` 时，会尝试恢复上次的窗口布局和工作目录。
-
-<details>
-<summary><strong>构建带 Dock 图标的 macOS 应用</strong></summary>
+只运行 `cargo run --release` 时，会尝试恢复上次的窗口布局和工作目录。构建带 Dock 图标的 macOS 应用：
 
 ```sh
 ./scripts/bundle.sh
@@ -97,6 +111,20 @@ open dist/LeafTerm.app
 这是用于本机开发的 ad-hoc 签名包，尚未使用开发者证书签名或公证。完整启动参数和打包选项见[构建与启动](docs/guide.zh-CN.md#getting-started)。
 
 </details>
+
+<a id="macos-first-launch"></a>
+
+### 首次打开 macOS 应用
+
+LeafTerm 尚未使用 Apple Developer ID 证书签名或经过 Apple 公证。首次打开时，如果 macOS 提示“已损坏”或“无法验证开发者”，请先确认应用来自本项目的可信来源，将 `LeafTerm.app` 放入“应用程序”文件夹，再打开 macOS 自带的“终端”执行：
+
+```sh
+sudo xattr -cr "/Applications/LeafTerm.app"
+```
+
+按提示输入 Mac 管理员密码（输入时不会显示字符），完成后重新打开 LeafTerm。如果应用放在其他位置，请将命令中的路径替换为实际的 `.app` 路径。
+
+该命令会递归清除这个应用包的扩展属性，包括下载隔离标记；它不会修复实际损坏的文件。如果仍无法打开，请重新下载应用。详见[首次打开说明](docs/guide.zh-CN.md#macos-first-launch)。
 
 ## 从检查改动，到完成修改
 
@@ -163,6 +191,8 @@ cargo clippy --all-targets --locked -- -D warnings
 ```
 
 [使用指南](docs/guide.zh-CN.md) · [颜色输出排查](docs/guide.zh-CN.md#terminal-colors) · [开发与验证](docs/guide.zh-CN.md#development)
+
+LeafTerm 使用 [MIT 许可证](LICENSE)开放源代码。第三方依赖保留各自的许可证。
 
 ---
 

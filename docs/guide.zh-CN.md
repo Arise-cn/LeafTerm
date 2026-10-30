@@ -12,7 +12,19 @@
 
 ## 启动与构建
 
-当前可运行版本的渲染后端为 **macOS Metal**。**Windows 版本正在开发中，暂不可用**；目前也没有 Linux 可运行后端。需要 Rust 稳定工具链、Xcode Command Line Tools 和 Git。主要开发环境是 Apple Silicon Mac，其他机器的兼容性仍需验证。
+当前可运行版本的渲染后端为 **macOS Metal**。**Windows 版本正在开发中，暂不可用**；目前也没有 Linux 可运行后端。主要开发环境是 Apple Silicon Mac，其他机器的兼容性仍需验证。
+
+### 下载并安装
+
+1. [下载 LeafTerm v0.1.0 macOS Apple Silicon 版](https://github.com/Arise-cn/LeafTerm/releases/download/v0.1.0/LeafTerm-0.1.0-macos-arm64.zip)，解压 ZIP。
+2. 将 `LeafTerm.app` 放入**应用程序**文件夹（`/Applications`）。
+3. 打开应用。如果 macOS 拦截启动，请按[首次打开说明](#macos-first-launch)处理。
+
+这是 Apple Silicon 开发预览版，尚未使用 Apple Developer ID 证书签名或经过 Apple 公证。使用应用不需要下载源码或安装 Rust；Git 侧栏需要本机有可用的 Git，AI CLI 工具需要另行安装。本次下载的详情见[版本说明](https://github.com/Arise-cn/LeafTerm/releases/tag/v0.1.0)。
+
+### 从源码构建和启动
+
+源码构建需要 Rust 稳定工具链、Xcode Command Line Tools 和 Git。
 
 在仓库目录中运行，并打开指定项目：
 
@@ -55,7 +67,25 @@ open dist/LeafTerm.app
 ./scripts/bundle.sh --no-build
 ```
 
-应用包使用本机开发用的 ad-hoc 签名，尚未使用开发者证书签名或公证，不应当作正式发布包分发。运行中的 Shell 和 AI 进程不会因为替换应用包而自动更新；下次启动应用时才会使用新版。
+应用包目前使用 ad-hoc 签名，尚未使用 Apple Developer ID 证书签名或经过 Apple 公证。运行中的 Shell 和 AI 进程不会因为替换应用包而自动更新；下次启动应用时才会使用新版。
+
+<a id="macos-first-launch"></a>
+
+### 首次打开 macOS 应用
+
+如果首次打开时 macOS 提示“LeafTerm 已损坏”或“无法验证开发者”，请先确认应用来自本项目的可信来源，再按以下步骤操作：
+
+1. 将 `LeafTerm.app` 放入“应用程序”文件夹（`/Applications`）。
+2. 打开 macOS 自带的“终端”，执行：
+
+   ```sh
+   sudo xattr -cr "/Applications/LeafTerm.app"
+   ```
+
+3. 按提示输入 Mac 管理员密码；输入时终端不会显示字符，输入完按回车。
+4. 完成后重新打开 LeafTerm。
+
+如果应用放在其他位置，请将命令中的路径替换为实际的 `.app` 路径。该命令会递归清除指定应用包的扩展属性，包括下载隔离标记；它不会修复实际损坏的文件。如果仍无法打开，请重新下载应用。
 
 <a id="shortcuts"></a>
 
