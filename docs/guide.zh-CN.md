@@ -16,11 +16,11 @@
 
 ### 下载并安装
 
-1. [下载 LeafTerm v0.1.0 macOS Apple Silicon 版](https://github.com/Arise-cn/LeafTerm/releases/download/v0.1.0/LeafTerm-0.1.0-macos-arm64.zip)，解压 ZIP。
+1. [下载 LeafTerm v0.1.1 macOS Apple Silicon 版](https://github.com/Arise-cn/LeafTerm/releases/download/v0.1.1/LeafTerm-0.1.1-macos-arm64.zip)，解压 ZIP。
 2. 将 `LeafTerm.app` 放入**应用程序**文件夹（`/Applications`）。
 3. 打开应用。如果 macOS 拦截启动，请按[首次打开说明](#macos-first-launch)处理。
 
-这是 Apple Silicon 开发预览版，尚未使用 Apple Developer ID 证书签名或经过 Apple 公证。使用应用不需要下载源码或安装 Rust；Git 侧栏需要本机有可用的 Git，AI CLI 工具需要另行安装。本次下载的详情见[版本说明](https://github.com/Arise-cn/LeafTerm/releases/tag/v0.1.0)。
+这是 Apple Silicon 开发预览版，尚未使用 Apple Developer ID 证书签名或经过 Apple 公证。使用应用不需要下载源码或安装 Rust；Git 侧栏需要本机有可用的 Git，AI CLI 工具需要另行安装。本次下载的详情见[版本说明](https://github.com/Arise-cn/LeafTerm/releases/tag/v0.1.1)。
 
 ### 从源码构建和启动
 
@@ -46,7 +46,7 @@ cargo run --release
 
 `--fresh` 跳过布局恢复；传入目录也会从该目录建立新布局。启动参数和主要快捷键可通过 `cargo run --release -- --help` 查看。如果 Rust 安装在默认位置但尚未加入 `PATH`，可以将命令中的 `cargo` 替换为 `~/.cargo/bin/cargo`。
 
-当前版本为 **0.1.0**。运行 `cargo run --release -- --version` 或 `leafterm --version`，可查看从 Cargo 包信息读取的编译版本。
+当前版本为 **0.1.1**。运行 `cargo run --release -- --version` 或 `leafterm --version`，可查看从 Cargo 包信息读取的编译版本。
 
 ### 构建 macOS 应用包
 
@@ -308,6 +308,6 @@ cargo clippy --all-targets --locked -- -D warnings
 
 终端内核固定在 Alacritty 官方提交 [`54214706`](https://github.com/alacritty/alacritty/commit/542147067dd016fc5f49120ef0ba605a98a4e3a7)，包含零宽字符存储上限和 Kitty 键盘模式栈修复。这是固定的开发版本，升级时应重新运行兼容性与资源测试。
 
-当前已有 88 项自动化测试和 1 项手动 release 基准。自动化覆盖真实 PTY、输入／窗口尺寸、macOS 空格键、彩色输出与环境变量、目录补全、Shell 启动配置、Git 状态与 worktree、文件读取和保存、中文字体、控制消息边界、子进程回收、布局迁移、搜索取消与资源边界、编辑撤销、冲突解析与单文件暂存，以及语法高亮与 Unicode 行内颜色映射。
+当前已有 90 项自动化测试和 1 项手动 release 基准。自动化覆盖真实 PTY、输入／窗口尺寸、macOS 空格键、彩色输出与环境变量、目录补全、Shell 启动配置、Git 状态与 worktree、文件读取和保存、中文字体、Tab 分栏的中英文混合文件名、控制消息边界、子进程回收、布局迁移、搜索取消与资源边界、编辑撤销、冲突解析与单文件暂存，以及语法高亮与 Unicode 行内颜色映射。
 
 已进行的窗口实测涵盖分屏、多窗口、目录跟随、文件搜索、编辑保存和草稿恢复、冲突处理与撤销，以及 JSON／TOML／Rust 高亮。开发预览版仍在迭代，这些检查不代表所有终端应用或机器都已完成兼容性验证。

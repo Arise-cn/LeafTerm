@@ -740,9 +740,13 @@ impl TerminalSession {
             if cell.flags.contains(Flags::INVERSE) {
                 std::mem::swap(&mut fg, &mut bg);
             }
-            let hidden = cell.flags.intersects(
-                Flags::HIDDEN | Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER,
-            );
+            // Alacritty retains tabs for copying, but already resolved their
+            // column positions. Shaping them again would shift ASCII runs
+            // over independently positioned wide characters.
+            let hidden = cell.c == '\t'
+                || cell.flags.intersects(
+                    Flags::HIDDEN | Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER,
+                );
             if !selected
                 && bg == DEFAULT_BG
                 && (hidden || cell.c == ' ')
@@ -1308,6 +1312,75 @@ mod tests {
         let first = snapshot.cells.iter().find(|c| c.text == "h").unwrap();
         assert_eq!(first.fg, palette(1));
         assert!(session.child_pid().is_some());
+    }
+
+    #[test]
+    fn real_pty_tabbed_filenames_keep_grid_columns_and_copy_text() {
+        let session = shell("printf 'left\\t\\tns-后台-用户管理\\n'", Path::new("/tmp"));
+        let snapshot = until(&session, |s| {
+            session.is_exited() && s.cells.iter().any(|c| c.text == "理")
+        });
+        let cells: Vec<_> = snapshot
+            .cells
+            .iter()
+            .map(|cell| (cell.row, cell.col, cell.text.as_str()))
+            .collect();
+        assert_eq!(
+            cells,
+            [
+                (0, 0, "l"),
+                (0, 1, "e"),
+                (0, 2, "f"),
+                (0, 3, "t"),
+                (0, 16, "n"),
+                (0, 17, "s"),
+                (0, 18, "-"),
+                (0, 19, "后"),
+                (0, 21, "台"),
+                (0, 23, "-"),
+                (0, 24, "用"),
+                (0, 26, "户"),
+                (0, 28, "管"),
+                (0, 30, "理"),
+            ]
+        );
+        session.select_start(0, 0);
+        session.select_update(31, 0);
+        assert_eq!(
+            session.selected_text().as_deref(),
+            Some("left\t\tns-后台-用户管理")
+        );
+    }
+
+    #[test]
+    fn real_pty_styled_tabs_keep_decorations_without_shaping_controls() {
+        // A tab retains the existing blank cell's attributes, so first paint
+        // a styled space and then move back to put a tab in that same cell.
+        let session = shell(
+            "printf '\\033[44m \\033[0m\\r\\tB\\n\\033[4m \\033[0m\\r\\tU\\n\\tS\\n'",
+            Path::new("/tmp"),
+        );
+        until(&session, |s| {
+            session.is_exited() && s.cells.iter().any(|c| c.text == "S")
+        });
+        session.select_start(0, 2);
+        session.select_update(8, 2);
+        let snapshot = session.snapshot();
+        for row in 0..3 {
+            let tab = snapshot
+                .cells
+                .iter()
+                .find(|cell| cell.row == row && cell.col == 0)
+                .unwrap();
+            assert!(tab.text.is_empty(), "tab must not reach text shaping");
+            match row {
+                0 => assert_eq!(tab.bg, palette(4)),
+                1 => assert!(tab.underline),
+                2 => assert!(tab.selected),
+                _ => unreachable!(),
+            }
+        }
+        assert_eq!(session.selected_text().as_deref(), Some("\tS"));
     }
 
     #[test]

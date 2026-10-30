@@ -14,7 +14,7 @@ Your agent’s terminal. Your code, in view.
 </p>
 
 <p>
-  <img src="https://img.shields.io/badge/version-v0.1.0-6DDEAA?style=flat-square" alt="版本 0.1.0" />
+  <img src="https://img.shields.io/badge/version-v0.1.1-6DDEAA?style=flat-square" alt="版本 0.1.1" />
   <img src="https://img.shields.io/badge/Rust-native-DEA584?style=flat-square&amp;logo=rust&amp;logoColor=white" alt="Built with Rust" />
   <img src="https://img.shields.io/badge/Metal-GPU_rendered-6DDEAA?style=flat-square" alt="Metal GPU rendering" />
   <img src="https://img.shields.io/badge/macOS-Apple_Silicon-9AAEB8?style=flat-square&amp;logo=apple&amp;logoColor=white" alt="Developed on macOS Apple Silicon" />
@@ -23,9 +23,9 @@ Your agent’s terminal. Your code, in view.
 </p>
 
 <p>
-  <a href="https://github.com/Arise-cn/LeafTerm/releases/download/v0.1.0/LeafTerm-0.1.0-macos-arm64.zip"><img src="https://img.shields.io/badge/%E4%B8%8B%E8%BD%BD-macOS_Apple_Silicon-6DDEAA?style=for-the-badge&amp;logo=apple&amp;logoColor=0C1114" alt="下载适用于 macOS Apple Silicon 的 LeafTerm" /></a>
+  <a href="https://github.com/Arise-cn/LeafTerm/releases/download/v0.1.1/LeafTerm-0.1.1-macos-arm64.zip"><img src="https://img.shields.io/badge/%E4%B8%8B%E8%BD%BD-macOS_Apple_Silicon-6DDEAA?style=for-the-badge&amp;logo=apple&amp;logoColor=0C1114" alt="下载适用于 macOS Apple Silicon 的 LeafTerm" /></a>
   <br />
-  <sub>v0.1.0 预览版 · ZIP · <a href="https://github.com/Arise-cn/LeafTerm/releases/tag/v0.1.0">版本说明</a></sub>
+  <sub>v0.1.1 预览版 · ZIP · <a href="https://github.com/Arise-cn/LeafTerm/releases/tag/v0.1.1">版本说明</a></sub>
 </p>
 
 [快速开始](#quick-start) · [功能一览](#features) · [常用快捷键](#shortcuts) · [完整指南](docs/guide.zh-CN.md) · [反馈问题](https://github.com/Arise-cn/LeafTerm/issues)
@@ -66,7 +66,7 @@ AI 已经在终端里写代码，查看分支、检查改动、调整配置、�
 
 ## 快速开始
 
-1. [下载 LeafTerm v0.1.0 macOS Apple Silicon 版](https://github.com/Arise-cn/LeafTerm/releases/download/v0.1.0/LeafTerm-0.1.0-macos-arm64.zip)，解压 ZIP。
+1. [下载 LeafTerm v0.1.1 macOS Apple Silicon 版](https://github.com/Arise-cn/LeafTerm/releases/download/v0.1.1/LeafTerm-0.1.1-macos-arm64.zip)，解压 ZIP。
 2. 将 `LeafTerm.app` 拖入**应用程序**文件夹（`/Applications`）。
 3. 打开 LeafTerm。如果 macOS 拦截启动，请按下方[首次打开说明](#macos-first-launch)处理。
 

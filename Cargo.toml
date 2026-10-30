@@ -1,6 +1,6 @@
 [package]
 name = "leafterm"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 description = "A GPU-rendered Rust terminal with a Git-aware file tree"
 repository = "https://github.com/Arise-cn/LeafTerm"

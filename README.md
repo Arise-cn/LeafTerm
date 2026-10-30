@@ -14,7 +14,7 @@ Keep the workflow. Skip the extra IDE.
 </p>
 
 <p>
-  <img src="https://img.shields.io/badge/version-v0.1.0-6DDEAA?style=flat-square" alt="Version 0.1.0" />
+  <img src="https://img.shields.io/badge/version-v0.1.1-6DDEAA?style=flat-square" alt="Version 0.1.1" />
   <img src="https://img.shields.io/badge/Rust-native-DEA584?style=flat-square&amp;logo=rust&amp;logoColor=white" alt="Built with Rust" />
   <img src="https://img.shields.io/badge/Metal-GPU_rendered-6DDEAA?style=flat-square" alt="Metal GPU rendering" />
   <img src="https://img.shields.io/badge/macOS-Apple_Silicon-9AAEB8?style=flat-square&amp;logo=apple&amp;logoColor=white" alt="Developed on macOS Apple Silicon" />
@@ -23,9 +23,9 @@ Keep the workflow. Skip the extra IDE.
 </p>
 
 <p>
-  <a href="https://github.com/Arise-cn/LeafTerm/releases/download/v0.1.0/LeafTerm-0.1.0-macos-arm64.zip"><img src="https://img.shields.io/badge/Download-macOS_Apple_Silicon-6DDEAA?style=for-the-badge&amp;logo=apple&amp;logoColor=0C1114" alt="Download LeafTerm for macOS Apple Silicon" /></a>
+  <a href="https://github.com/Arise-cn/LeafTerm/releases/download/v0.1.1/LeafTerm-0.1.1-macos-arm64.zip"><img src="https://img.shields.io/badge/Download-macOS_Apple_Silicon-6DDEAA?style=for-the-badge&amp;logo=apple&amp;logoColor=0C1114" alt="Download LeafTerm for macOS Apple Silicon" /></a>
   <br />
-  <sub>v0.1.0 preview · ZIP · <a href="https://github.com/Arise-cn/LeafTerm/releases/tag/v0.1.0">Release notes</a></sub>
+  <sub>v0.1.1 preview · ZIP · <a href="https://github.com/Arise-cn/LeafTerm/releases/tag/v0.1.1">Release notes</a></sub>
 </p>
 
 [Quick start](#quick-start) · [Features](#features) · [Shortcuts](#shortcuts) · [User guide](docs/guide.md) · [Report an issue](https://github.com/Arise-cn/LeafTerm/issues)
@@ -66,7 +66,7 @@ Underneath it all: a real local shell and PTY, ANSI 16-color / 256-color / truec
 
 ## Quick start
 
-1. [Download LeafTerm v0.1.0 for macOS Apple Silicon](https://github.com/Arise-cn/LeafTerm/releases/download/v0.1.0/LeafTerm-0.1.0-macos-arm64.zip) and unzip it.
+1. [Download LeafTerm v0.1.1 for macOS Apple Silicon](https://github.com/Arise-cn/LeafTerm/releases/download/v0.1.1/LeafTerm-0.1.1-macos-arm64.zip) and unzip it.
 2. Drag `LeafTerm.app` into **Applications** (`/Applications`).
 3. Open LeafTerm. If macOS blocks the app, follow the [first launch instructions](#macos-first-launch) below.
 

@@ -14,11 +14,11 @@ The current renderer uses **Metal on macOS**. Windows support is in development 
 
 ### Download and install
 
-1. [Download LeafTerm v0.1.0 for macOS Apple Silicon](https://github.com/Arise-cn/LeafTerm/releases/download/v0.1.0/LeafTerm-0.1.0-macos-arm64.zip) and unzip it.
+1. [Download LeafTerm v0.1.1 for macOS Apple Silicon](https://github.com/Arise-cn/LeafTerm/releases/download/v0.1.1/LeafTerm-0.1.1-macos-arm64.zip) and unzip it.
 2. Move `LeafTerm.app` to **Applications** (`/Applications`).
 3. Open the app. If macOS blocks it, follow the [first launch instructions](#macos-first-launch).
 
-This is an Apple Silicon development preview without Apple Developer ID signing or Apple notarization. The app does not require a source checkout or Rust. The Git sidebar requires a working local Git installation; install AI CLI tools separately. See the [release notes](https://github.com/Arise-cn/LeafTerm/releases/tag/v0.1.0) for this download.
+This is an Apple Silicon development preview without Apple Developer ID signing or Apple notarization. The app does not require a source checkout or Rust. The Git sidebar requires a working local Git installation; install AI CLI tools separately. See the [release notes](https://github.com/Arise-cn/LeafTerm/releases/tag/v0.1.1) for this download.
 
 ### Build and run from source
 
@@ -44,7 +44,7 @@ cargo run --release
 
 `--fresh` skips layout restoration. Passing a directory also creates a new layout rooted at that directory. Run `cargo run --release -- --help` for startup options and the main shortcuts. If Rust is installed in its default location but is not on your `PATH`, replace `cargo` with `~/.cargo/bin/cargo`.
 
-The current version is **0.1.0**. Use `cargo run --release -- --version` or `leafterm --version` to display the version compiled from Cargo package metadata.
+The current version is **0.1.1**. Use `cargo run --release -- --version` or `leafterm --version` to display the version compiled from Cargo package metadata.
 
 ### Build a macOS app bundle
 
@@ -302,6 +302,6 @@ Core components:
 
 The terminal core is pinned to official Alacritty commit [`54214706`](https://github.com/alacritty/alacritty/commit/542147067dd016fc5f49120ef0ba605a98a4e3a7), which includes limits on stored zero-width characters and fixes to the Kitty mode stack. This is a pinned development revision; rerun compatibility and resource tests when upgrading it.
 
-The project currently has 88 automated tests and one manual release benchmark. Automated coverage includes real PTYs, input and window sizing, the macOS space key, color output and environment variables, directory completion, shell startup configuration, Git status and worktrees, file reading and saving, Chinese fonts, control-message limits, child-process cleanup, layout migration, search cancellation and resource limits, editing undo, conflict parsing and single-file staging, and syntax highlighting with Unicode color-range mapping.
+The project currently has 90 automated tests and one manual release benchmark. Automated coverage includes real PTYs, input and window sizing, the macOS space key, color output and environment variables, directory completion, shell startup configuration, Git status and worktrees, file reading and saving, Chinese fonts, tab-separated mixed-language filenames, control-message limits, child-process cleanup, layout migration, search cancellation and resource limits, editing undo, conflict parsing and single-file staging, and syntax highlighting with Unicode color-range mapping.
 
 Window testing has covered splits, multiple windows, directory following, file search, editing and draft recovery, conflict resolution and undo, and JSON/TOML/Rust highlighting. The development preview continues to evolve; these checks do not imply that every terminal application or machine has been validated.
