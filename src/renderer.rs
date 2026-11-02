@@ -3,7 +3,13 @@
 //! The terminal parser and text shaping run on the CPU; rectangles and cached glyphs are
 //! composited on the GPU. Keeping one font system and atlas avoids duplicating them per pane.
 
-use std::{collections::HashSet, mem, ops::Range, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet, hash_map::DefaultHasher},
+    hash::{Hash, Hasher},
+    mem,
+    ops::Range,
+    sync::Arc,
+};
 
 use anyhow::{Context, Result};
 use bytemuck::{Pod, Zeroable};
@@ -43,7 +49,7 @@ pub struct TextRun {
     pub clip: [f32; 4],
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct ColorSpan {
     pub range: Range<usize>,
     pub color: [u8; 4],
@@ -64,6 +70,7 @@ struct CachedText {
     line_height: f32,
     bold: bool,
     italic: bool,
+    visible: bool,
 }
 
 impl CachedText {
@@ -81,19 +88,23 @@ impl CachedText {
             line_height: 0.0,
             bold: !run.bold,
             italic: !run.italic,
+            visible: true,
         };
         cached.update(fonts, run);
         cached
     }
 
-    fn update(&mut self, fonts: &mut FontSystem, run: &TextRun) {
-        if self.text == run.text
+    fn matches(&self, run: &TextRun) -> bool {
+        self.text == run.text
             && self.colors == run.colors
             && self.font_size == run.font_size
             && self.line_height == run.line_height
             && self.bold == run.bold
             && self.italic == run.italic
-        {
+    }
+
+    fn update(&mut self, fonts: &mut FontSystem, run: &TextRun) {
+        if self.matches(run) {
             return;
         }
         self.buffer.set_metrics_and_size(
@@ -192,6 +203,67 @@ impl CachedText {
     }
 }
 
+/// Content-addressed shaping for the visible frame. Position, clipping and the
+/// default foreground color are applied by TextArea, so scrolling and repeated
+/// CJK cells can share buffers without changing terminal column placement.
+#[derive(Default)]
+struct TextBuffers {
+    entries: HashMap<u64, Vec<CachedText>>,
+    keys: Vec<u64>,
+}
+
+impl TextBuffers {
+    fn prepare(&mut self, fonts: &mut FontSystem, texts: &[TextRun]) -> usize {
+        for cached in self.entries.values_mut().flatten() {
+            cached.visible = false;
+        }
+        self.keys.clear();
+        let mut shaped = 0;
+        for run in texts {
+            let mut hash = DefaultHasher::new();
+            run.text.hash(&mut hash);
+            run.colors.hash(&mut hash);
+            run.font_size.to_bits().hash(&mut hash);
+            run.line_height.to_bits().hash(&mut hash);
+            run.bold.hash(&mut hash);
+            run.italic.hash(&mut hash);
+            let key = hash.finish();
+            self.keys.push(key);
+            let bucket = self.entries.entry(key).or_default();
+            // Check full equality as well: hash collisions must never display
+            // the wrong text or style.
+            if let Some(cached) = bucket.iter_mut().find(|cached| cached.matches(run)) {
+                cached.visible = true;
+            } else {
+                bucket.push(CachedText::new(fonts, run));
+                shaped += 1;
+            }
+        }
+        // Retain only visible content, not an unbounded history or closed panes.
+        self.entries.retain(|_, bucket| {
+            bucket.retain(|cached| cached.visible);
+            !bucket.is_empty()
+        });
+        if self.entries.capacity() > self.entries.len().max(128) * 4 {
+            self.entries.shrink_to(self.entries.len().max(128));
+        }
+        if self.keys.capacity() > texts.len().max(128) * 4 {
+            self.keys.shrink_to(texts.len().max(128));
+        }
+        shaped
+    }
+
+    fn buffers<'a>(&'a self, texts: &'a [TextRun]) -> impl Iterator<Item = &'a Buffer> {
+        self.keys.iter().zip(texts).map(|(key, run)| {
+            &self.entries[key]
+                .iter()
+                .find(|cached| cached.matches(run))
+                .expect("visible text was prepared")
+                .buffer
+        })
+    }
+}
+
 pub struct Renderer {
     // The surface is dropped before the retained window.
     surface: wgpu::Surface<'static>,
@@ -208,7 +280,7 @@ pub struct Renderer {
     atlas: TextAtlas,
     viewport: Viewport,
     text_renderer: TextRenderer,
-    text_buffers: Vec<CachedText>,
+    text_buffers: TextBuffers,
     metric_cache: Option<(f32, (f32, f32))>,
     glyph_working_set: HashSet<(char, u32, bool, bool)>,
     suspended: bool,
@@ -322,7 +394,7 @@ impl Renderer {
             atlas,
             viewport,
             text_renderer,
-            text_buffers: Vec::new(),
+            text_buffers: TextBuffers::default(),
             metric_cache: None,
             glyph_working_set: HashSet::new(),
             suspended: size.width == 0 || size.height == 0,
@@ -409,15 +481,8 @@ impl Renderer {
             self.vertices.shrink_to(self.vertices.len().max(4096));
         }
 
-        // Only retain buffers for this frame's visible runs. A closed pane must not keep
-        // its entire shaped screen alive in a renderer cache.
-        for (index, run) in texts.iter().enumerate() {
-            if let Some(buffer) = self.text_buffers.get_mut(index) {
-                buffer.update(&mut self.fonts, run);
-            } else {
-                self.text_buffers
-                    .push(CachedText::new(&mut self.fonts, run));
-            }
+        self.text_buffers.prepare(&mut self.fonts, texts);
+        for run in texts {
             for character in run.text.chars() {
                 self.glyph_working_set.insert((
                     character,
@@ -426,10 +491,6 @@ impl Renderer {
                     run.italic,
                 ));
             }
-        }
-        self.text_buffers.truncate(texts.len());
-        if self.text_buffers.capacity() > texts.len().max(128) * 4 {
-            self.text_buffers.shrink_to(texts.len().max(128));
         }
         // trim() enables LRU reuse but doesn't shrink atlas textures. Recreate after
         // substantial font/glyph churn (e.g. many zoom changes) to release high-water
@@ -459,10 +520,10 @@ impl Renderer {
                 &mut self.atlas,
                 &self.viewport,
                 self.text_buffers
-                    .iter()
+                    .buffers(texts)
                     .zip(texts)
-                    .map(|(cached, run)| TextArea {
-                        buffer: &cached.buffer,
+                    .map(|(buffer, run)| TextArea {
+                        buffer,
                         left: run.x,
                         top: run.y,
                         scale: 1.0,
@@ -624,6 +685,152 @@ mod tests {
             italic: false,
             clip: [0.0, 0.0, 500.0, 38.0],
         }
+    }
+
+    #[test]
+    fn scrolling_reuses_shaping_and_shares_repeated_unicode_cells() {
+        let mut fonts = FontSystem::new();
+        fonts.db_mut().set_monospace_family("Menlo");
+        let mut cache = TextBuffers::default();
+        let first = vec![
+            text_run("old row"),
+            text_run("中"),
+            text_run("e\u{301}"),
+            text_run("👩‍💻"),
+        ];
+        assert_eq!(cache.prepare(&mut fonts, &first), 4);
+        let mut second = first[1..].to_vec();
+        for (index, run) in second.iter_mut().enumerate() {
+            run.x = 100.0;
+            run.y = index as f32 * 38.0;
+            run.clip = [100.0, 0.0, 900.0, 400.0];
+            run.color = [100, 200, 100, 255];
+        }
+        second.push(text_run("中"));
+        second.push(text_run("new row"));
+        assert_eq!(cache.prepare(&mut fonts, &second), 1);
+        let buffers: Vec<_> = cache.buffers(&second).collect();
+        assert!(std::ptr::eq(buffers[0], buffers[3]));
+        // The cached glyph geometry must match independent shaping, including
+        // combining marks and emoji; positions remain a TextArea concern.
+        for (buffer, run) in buffers.iter().zip(&second) {
+            let fresh = CachedText::new(&mut fonts, run);
+            let geometry = |buffer: &Buffer| {
+                buffer
+                    .layout_runs()
+                    .flat_map(|line| line.glyphs)
+                    .map(|glyph| (glyph.font_id, glyph.glyph_id, glyph.x, glyph.y, glyph.w))
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(geometry(buffer), geometry(&fresh.buffer));
+        }
+        assert_eq!(cache.prepare(&mut fonts, &second), 0);
+        assert_eq!(cache.entries.values().map(Vec::len).sum::<usize>(), 4);
+        cache.prepare(&mut fonts, &[]);
+        assert!(
+            cache.entries.is_empty(),
+            "closed panes must release shaping"
+        );
+    }
+
+    #[test]
+    fn shaping_cache_distinguishes_metrics_and_styles() {
+        let mut fonts = FontSystem::new();
+        let plain = text_run("中文 code");
+        let mut variants = vec![plain.clone(); 6];
+        variants[1].bold = true;
+        variants[2].italic = true;
+        variants[3].font_size += 2.0;
+        variants[4].line_height += 2.0;
+        variants[5].colors.push(ColorSpan {
+            range: 0..6,
+            color: [100, 200, 100, 255],
+        });
+        let mut cache = TextBuffers::default();
+        assert_eq!(cache.prepare(&mut fonts, &variants), 6);
+        variants.reverse();
+        assert_eq!(cache.prepare(&mut fonts, &variants), 0);
+        // Exercise collision handling by putting unrelated content in the
+        // expected hash bucket before looking up the original run again.
+        cache.prepare(&mut fonts, std::slice::from_ref(&plain));
+        let key = cache.keys[0];
+        cache
+            .entries
+            .insert(key, vec![CachedText::new(&mut fonts, &text_run("wrong"))]);
+        assert_eq!(cache.prepare(&mut fonts, std::slice::from_ref(&plain)), 1);
+        assert_eq!(
+            cache.buffers(&[plain]).next().unwrap().lines[0].text(),
+            "中文 code"
+        );
+    }
+
+    /// CPU shaping only; excludes snapshot construction, GPU work and presentation.
+    /// Run with: cargo test --release benchmark_scrolling_shaping -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn benchmark_scrolling_shaping() {
+        use std::time::Instant;
+
+        let frames: Vec<Vec<TextRun>> = (0..120)
+            .map(|offset| {
+                let mut runs = Vec::new();
+                for row in 0..40 {
+                    let line = offset + row;
+                    let text = if line % 2 == 0 {
+                        "正在检查终端滚动性能，复用中文排版缓存并保持字符位置正确。"
+                    } else {
+                        "修改完成后运行测试，确认历史记录和多个分屏仍然正常显示。"
+                    };
+                    for (col, ch) in text.chars().enumerate() {
+                        let mut run = text_run(&ch.to_string());
+                        run.x = col as f32 * 26.0;
+                        run.y = row as f32 * 38.0;
+                        runs.push(run);
+                    }
+                    let mut run = text_run(&format!(" output line {line}: let value = {line};"));
+                    run.y = row as f32 * 38.0;
+                    runs.push(run);
+                }
+                runs
+            })
+            .collect();
+        let mut fonts = FontSystem::new();
+        fonts.db_mut().set_monospace_family("Menlo");
+        let mut old: Vec<_> = frames[0]
+            .iter()
+            .map(|run| CachedText::new(&mut fonts, run))
+            .collect();
+        let mut before = Vec::new();
+        for runs in &frames[1..] {
+            let start = Instant::now();
+            for (cached, run) in old.iter_mut().zip(runs) {
+                cached.update(&mut fonts, run);
+            }
+            before.push(start.elapsed().as_secs_f64() * 1000.0);
+        }
+        let mut cache = TextBuffers::default();
+        cache.prepare(&mut fonts, &frames[0]);
+        let mut after = Vec::new();
+        let mut shaped = 0;
+        for runs in &frames[1..] {
+            let start = Instant::now();
+            shaped += cache.prepare(&mut fonts, runs);
+            // Include the renderer's buffer lookups in the measured work.
+            for buffer in cache.buffers(runs) {
+                std::hint::black_box(buffer);
+            }
+            after.push(start.elapsed().as_secs_f64() * 1000.0);
+        }
+        before.sort_by(f64::total_cmp);
+        after.sort_by(f64::total_cmp);
+        eprintln!(
+            "40 rows of mixed Chinese/code, 119 one-line scrolls: old p50={:.3}ms p95={:.3}ms; content cache p50={:.3}ms p95={:.3}ms; newly shaped={shaped}",
+            before[59], before[113], after[59], after[113]
+        );
+        assert_eq!(
+            shaped, 119,
+            "only the newly exposed ASCII row needs shaping"
+        );
     }
 
     #[test]

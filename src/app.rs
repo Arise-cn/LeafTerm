@@ -24,7 +24,7 @@ use crate::{
     merge::{self, Conflict},
     merge_view::{self, MergeAction},
     renderer::{Rect, Renderer, TextRun},
-    terminal::TerminalSession,
+    terminal::{TerminalSession, TerminalSnapshot},
     theme::{AMBER, BG, BORDER, FG, GREEN, MUTED, PANEL, RED, SURFACE},
     windows::{SavedPane, SavedWindow, WindowProxy},
     workspace::{self, DiffKind, DirectoryListing, FileChange, WorkspaceSnapshot},
@@ -355,6 +355,7 @@ pub struct App {
     name: String,
     pub close_requested: bool,
     sessions: HashMap<u64, TerminalSession>,
+    terminal_snapshots: HashMap<u64, TerminalSnapshot>,
     next_id: u64,
     scene: Scene,
     modifiers: ModifiersState,
@@ -506,6 +507,7 @@ impl App {
             name: String::new(),
             close_requested: false,
             sessions: HashMap::new(),
+            terminal_snapshots: HashMap::new(),
             next_id: 1,
             scene: Scene::default(),
             modifiers: ModifiersState::empty(),
@@ -624,6 +626,7 @@ impl App {
                 self.active = layout.ids()[0];
             }
             self.layout = layout;
+            self.terminal_snapshots.remove(&id);
             if let Some(session) = self.sessions.remove(&id) {
                 session.shutdown();
                 std::thread::spawn(move || drop(session));
@@ -1973,6 +1976,7 @@ impl App {
             h: height.max(1.0),
         };
         if self.preview.is_some() {
+            self.terminal_snapshots.clear();
             self.paint_preview(&mut s, body);
         } else {
             let active = self.active;
@@ -1981,6 +1985,10 @@ impl App {
             } else {
                 self.layout.arrange(body)
             };
+            // Retain only visible panes: closing or zooming a pane must release
+            // its copied cells, and showing it again takes a fresh snapshot.
+            self.terminal_snapshots
+                .retain(|id, _| panes.iter().any(|(visible, _)| visible == id));
             s.dividers = dividers;
             for (id, bounds) in panes {
                 s.rect(bounds, BORDER);
@@ -2008,7 +2016,17 @@ impl App {
                 let cols = (terminal.w / self.cell.0).floor().max(2.0) as u16;
                 let rows = (terminal.h / self.cell.1).floor().max(1.0) as u16;
                 let _ = session.resize(cols, rows);
-                let snapshot = session.snapshot();
+                // Resize marks the session dirty too. Reuse unchanged panes
+                // without copying their entire visible grid.
+                let snapshot = self
+                    .terminal_snapshots
+                    .entry(id)
+                    .and_modify(|snapshot| {
+                        if session.is_dirty() {
+                            *snapshot = session.snapshot();
+                        }
+                    })
+                    .or_insert_with(|| session.snapshot());
                 let terminal = Bounds {
                     w: snapshot.cols as f32 * self.cell.0,
                     h: snapshot.rows as f32 * self.cell.1,
@@ -3671,6 +3689,7 @@ impl App {
                     MouseScrollDelta::LineDelta(x, y) => (-x * 3.0, -y * 3.0),
                     MouseScrollDelta::PixelDelta(p) => (-p.x as f32 / 12.0, -p.y as f32 / 12.0),
                 };
+                let mut needs_redraw = true;
                 if self.sidebar_visible && self.mouse.0 < self.sidebar {
                     self.sidebar_scroll =
                         (self.sidebar_scroll + lines * 12.0).clamp(0.0, self.sidebar_max);
@@ -3713,10 +3732,14 @@ impl App {
                         .find(|(_, b)| b.contains(self.mouse.0, self.mouse.1))
                         && let Some(s) = self.sessions.get(id)
                     {
-                        s.scroll(-steps);
+                        needs_redraw = s.scroll(-steps);
+                    } else {
+                        needs_redraw = false;
                     }
                 }
-                self.redraw();
+                if needs_redraw {
+                    self.redraw();
+                }
             }
             WindowEvent::DroppedFile(path) => {
                 if self.prompt.is_none()
@@ -3780,6 +3803,7 @@ impl App {
     }
 
     pub fn shutdown(&mut self) {
+        self.terminal_snapshots.clear();
         for session in self.sessions.values() {
             session.shutdown();
         }

@@ -507,7 +507,11 @@ impl TerminalSession {
 
     /// Positive lines scroll up. Fullscreen TUIs receive wheel events (when
     /// requested), or application-cursor keys for alternate-screen scrolling.
-    pub fn scroll(&self, lines: i32) {
+    /// Returns whether the viewport moved or input was forwarded to the TUI.
+    pub fn scroll(&self, lines: i32) -> bool {
+        if lines == 0 {
+            return false;
+        }
         let mode = *self.term.lock().mode();
         let count = lines.unsigned_abs().min(50);
         if mode.intersects(TermMode::MOUSE_MODE) {
@@ -521,9 +525,18 @@ impl TerminalSession {
                 let _ = self.send_key(key, false, false, false);
             }
         } else {
-            self.term.lock().scroll_display(Scroll::Delta(lines));
+            let mut term = self.term.lock();
+            let offset = term.grid().display_offset();
+            let next = (offset as i64 + i64::from(lines)).clamp(0, term.history_size() as i64);
+            if next == offset as i64 {
+                // Even a no-op scroll_display emits MouseCursorDirty, which wakes
+                // the UI. Avoid the call when already at either history boundary.
+                return false;
+            }
+            term.scroll_display(Scroll::Delta((next - offset as i64) as i32));
             self.shared.changed();
         }
+        true
     }
 
     // These fields directly describe one terminal mouse-protocol event.
@@ -1695,6 +1708,76 @@ mod tests {
             );
             std::thread::sleep(Duration::from_millis(10));
         }
+    }
+
+    #[test]
+    fn terminal_scroll_only_invalidates_when_history_offset_changes() {
+        let session = shell(
+            "i=0; while [ $i -lt 60 ]; do printf 'line %s\\n' \"$i\"; i=$((i + 1)); done",
+            Path::new("/tmp"),
+        );
+        until(&session, |_| session.is_exited());
+        assert!(session.term.lock().history_size() > 0);
+        assert!(!session.is_dirty());
+
+        assert!(!session.scroll(0));
+        assert!(!session.scroll(-1));
+        assert!(
+            !session.is_dirty(),
+            "bottom boundary must not schedule a frame"
+        );
+
+        assert!(session.scroll(1));
+        assert!(session.is_dirty());
+        assert_eq!(session.term.lock().grid().display_offset(), 1);
+        session.snapshot();
+        assert!(!session.is_dirty());
+
+        assert!(session.scroll(i32::MAX));
+        session.snapshot();
+        assert!(!session.scroll(1));
+        assert!(
+            !session.is_dirty(),
+            "top boundary must not schedule a frame"
+        );
+        assert!(session.scroll(i32::MIN));
+        session.snapshot();
+        assert_eq!(session.term.lock().grid().display_offset(), 0);
+
+        session.shared.changed();
+        assert!(!session.scroll(-1));
+        assert!(
+            session.is_dirty(),
+            "no-op scrolling must preserve pending output"
+        );
+    }
+
+    #[test]
+    fn viewport_changes_invalidate_terminal_snapshot() {
+        let session = shell("printf 'ready'; sleep 5", Path::new("/tmp"));
+        until(&session, |s| {
+            s.cells.iter().map(|c| c.text.as_str()).collect::<String>() == "ready"
+        });
+        assert!(!session.is_dirty());
+        session.resize(80, 24).unwrap();
+        assert!(
+            !session.is_dirty(),
+            "same-size layout must reuse the snapshot"
+        );
+        session.resize(81, 24).unwrap();
+        assert!(session.is_dirty());
+        assert_eq!(session.snapshot().cols, 81);
+
+        session.select_start(0, 0);
+        assert!(session.is_dirty());
+        session.snapshot();
+        session.select_update(2, 0);
+        assert!(session.is_dirty());
+        assert!(session.snapshot().cells.iter().any(|c| c.selected));
+        session.clear_selection();
+        assert!(session.is_dirty());
+        assert!(session.snapshot().cells.iter().all(|c| !c.selected));
+        assert!(!session.is_dirty());
     }
 
     #[test]
