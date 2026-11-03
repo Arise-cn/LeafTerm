@@ -16,11 +16,11 @@
 
 ### 下载并安装
 
-1. [下载 LeafTerm v0.1.1 macOS Apple Silicon 版](https://github.com/Arise-cn/LeafTerm/releases/download/v0.1.1/LeafTerm-0.1.1-macos-arm64.zip)，解压 ZIP。
+1. [下载 LeafTerm v0.1.3 macOS Apple Silicon 版](https://github.com/Arise-cn/LeafTerm/releases/download/v0.1.3/LeafTerm-0.1.3-macos-arm64.zip)，解压 ZIP。
 2. 将 `LeafTerm.app` 放入**应用程序**文件夹（`/Applications`）。
 3. 打开应用。如果 macOS 拦截启动，请按[首次打开说明](#macos-first-launch)处理。
 
-这是 Apple Silicon 开发预览版，尚未使用 Apple Developer ID 证书签名或经过 Apple 公证。使用应用不需要下载源码或安装 Rust；Git 侧栏需要本机有可用的 Git，AI CLI 工具需要另行安装。本次下载的详情见[版本说明](https://github.com/Arise-cn/LeafTerm/releases/tag/v0.1.1)。
+这是 Apple Silicon 开发预览版，尚未使用 Apple Developer ID 证书签名或经过 Apple 公证。使用应用不需要下载源码或安装 Rust；Git 侧栏需要本机有可用的 Git，AI CLI 工具需要另行安装。本次下载的详情见[版本说明](https://github.com/Arise-cn/LeafTerm/releases/tag/v0.1.3)。
 
 ### 从源码构建和启动
 
@@ -46,7 +46,7 @@ cargo run --release
 
 `--fresh` 跳过布局恢复；传入目录也会从该目录建立新布局。启动参数和主要快捷键可通过 `cargo run --release -- --help` 查看。如果 Rust 安装在默认位置但尚未加入 `PATH`，可以将命令中的 `cargo` 替换为 `~/.cargo/bin/cargo`。
 
-当前版本为 **0.1.1**。运行 `cargo run --release -- --version` 或 `leafterm --version`，可查看从 Cargo 包信息读取的编译版本。
+当前版本为 **0.1.3**。运行 `cargo run --release -- --version` 或 `leafterm --version`，可查看从 Cargo 包信息读取的编译版本。
 
 ### 构建 macOS 应用包
 
@@ -117,7 +117,7 @@ open dist/LeafTerm.app
 | 关闭文件预览／Diff／取消弹窗 | `Esc` |
 | 滚动编辑器／只读预览／Diff | 滚轮；只读视图也可用 `↑` / `↓` |
 | 横向滚动编辑器／只读预览／Diff | `Shift` + 滚轮；只读视图也可用 `←` / `→` |
-| 复制文件路径 | 右键侧栏文件条目 |
+| 文件操作菜单 | 右键文件／文件夹；菜单内可复制绝对路径或相对路径 |
 | 退出 | `⌘ Q`，确认后退出 |
 
 关闭确认支持鼠标点击 **Cancel** 和 **Close**。有未保存的编辑内容时，会先提供保存、丢弃或取消选项。
@@ -130,10 +130,14 @@ open dist/LeafTerm.app
 
 | 视图 | 内容与操作 |
 | --- | --- |
-| **Files** | 按需展开文件夹，显示 Git 变更标记；可切换隐藏文件，按名称或路径搜索，点击文件编辑，右键复制路径。 |
+| **Files** | 按需展开文件夹，显示 Git 变更标记；可切换隐藏文件，按名称或路径搜索，点击文件编辑，右键打开文件操作菜单。 |
 | **Changes** | 区分未暂存、已暂存和未跟踪文件；点击普通变更查看只读 Diff，点击 **CONFLICTS** 中的文件解决冲突。 |
 
 按 `⌘ E` 切换视图，`⌘ R` 手动刷新 Git。Git 侧栏默认只读取仓库；冲突编辑器中的 **Mark resolved** 会显式暂存当前已保存的文件。提交、继续合并／变基、重置和切换分支等操作由你在终端完成。
+
+右键文件可重命名、移到废纸篓、在 Finder 中显示、用默认应用打开，以及复制路径；**Copy Relative Path** 以侧栏项目根目录为基准。Git 变更文件还提供查看未暂存／已暂存更改或解决冲突的入口。右键文件夹可新建文件或文件夹；右键 Files 空白处可在项目根目录新建、刷新或折叠全部。菜单支持 `↑` / `↓` 选择、`Enter` 执行、`Esc` 或点击外部关闭。
+
+**Open in New Terminal** 在新分屏中启动独立 Shell，工作目录为所选文件夹或文件的所在目录。新建和重命名不会覆盖同名项；**Move to Trash** 使用 macOS 废纸篓，失败时不会改为永久删除。重命名／删除涉及当前未保存的文件时会先提示处理；其他窗口中的相关未保存编辑或恢复草稿需要先保存或关闭。操作成功后会刷新文件树和搜索结果。
 
 <a id="file-search"></a>
 
@@ -308,6 +312,6 @@ cargo clippy --all-targets --locked -- -D warnings
 
 终端内核固定在 Alacritty 官方提交 [`54214706`](https://github.com/alacritty/alacritty/commit/542147067dd016fc5f49120ef0ba605a98a4e3a7)，包含零宽字符存储上限和 Kitty 键盘模式栈修复。这是固定的开发版本，升级时应重新运行兼容性与资源测试。
 
-当前已有 90 项自动化测试和 1 项手动 release 基准。自动化覆盖真实 PTY、输入／窗口尺寸、macOS 空格键、彩色输出与环境变量、目录补全、Shell 启动配置、Git 状态与 worktree、文件读取和保存、中文字体、Tab 分栏的中英文混合文件名、控制消息边界、子进程回收、布局迁移、搜索取消与资源边界、编辑撤销、冲突解析与单文件暂存，以及语法高亮与 Unicode 行内颜色映射。
+当前已有 103 项自动化测试和 2 项手动 release 基准。自动化覆盖真实 PTY、输入／窗口尺寸、macOS 空格键、彩色输出与环境变量、目录补全、Shell 启动配置、Git 状态与 worktree、文件读取和保存、右键菜单选择与定位、创建和重命名的防覆盖保护、中文字体、Tab 分栏的中英文混合文件名、控制消息边界、子进程回收、布局迁移、搜索取消与资源边界、编辑撤销、冲突解析与单文件暂存，以及语法高亮与 Unicode 行内颜色映射。
 
 已进行的窗口实测涵盖分屏、多窗口、目录跟随、文件搜索、编辑保存和草稿恢复、冲突处理与撤销，以及 JSON／TOML／Rust 高亮。开发预览版仍在迭代，这些检查不代表所有终端应用或机器都已完成兼容性验证。

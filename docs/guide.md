@@ -14,11 +14,11 @@ The current renderer uses **Metal on macOS**. Windows support is in development 
 
 ### Download and install
 
-1. [Download LeafTerm v0.1.1 for macOS Apple Silicon](https://github.com/Arise-cn/LeafTerm/releases/download/v0.1.1/LeafTerm-0.1.1-macos-arm64.zip) and unzip it.
+1. [Download LeafTerm v0.1.3 for macOS Apple Silicon](https://github.com/Arise-cn/LeafTerm/releases/download/v0.1.3/LeafTerm-0.1.3-macos-arm64.zip) and unzip it.
 2. Move `LeafTerm.app` to **Applications** (`/Applications`).
 3. Open the app. If macOS blocks it, follow the [first launch instructions](#macos-first-launch).
 
-This is an Apple Silicon development preview without Apple Developer ID signing or Apple notarization. The app does not require a source checkout or Rust. The Git sidebar requires a working local Git installation; install AI CLI tools separately. See the [release notes](https://github.com/Arise-cn/LeafTerm/releases/tag/v0.1.1) for this download.
+This is an Apple Silicon development preview without Apple Developer ID signing or Apple notarization. The app does not require a source checkout or Rust. The Git sidebar requires a working local Git installation; install AI CLI tools separately. See the [release notes](https://github.com/Arise-cn/LeafTerm/releases/tag/v0.1.3) for this download.
 
 ### Build and run from source
 
@@ -44,7 +44,7 @@ cargo run --release
 
 `--fresh` skips layout restoration. Passing a directory also creates a new layout rooted at that directory. Run `cargo run --release -- --help` for startup options and the main shortcuts. If Rust is installed in its default location but is not on your `PATH`, replace `cargo` with `~/.cargo/bin/cargo`.
 
-The current version is **0.1.1**. Use `cargo run --release -- --version` or `leafterm --version` to display the version compiled from Cargo package metadata.
+The current version is **0.1.3**. Use `cargo run --release -- --version` or `leafterm --version` to display the version compiled from Cargo package metadata.
 
 ### Build a macOS app bundle
 
@@ -111,7 +111,7 @@ This command recursively clears the app's extended attributes, including quarant
 | Close a file preview / diff / cancel a dialog | `Esc` |
 | Scroll the editor / read-only preview / diff | Scroll wheel; read-only views also accept `↑` / `↓` |
 | Scroll the editor / read-only preview / diff horizontally | `Shift` + scroll wheel; read-only views also accept `←` / `→` |
-| Copy a file path | Right-click its sidebar entry |
+| File actions menu | Right-click a file or folder; choose Copy Path or Copy Relative Path |
 | Quit | `⌘ Q`, then confirm |
 
 Close confirmations provide clickable **Cancel** and **Close** buttons. If an editor contains unsaved changes, a save, discard, or cancel prompt appears first.
@@ -124,10 +124,14 @@ The sidebar shows the current Git branch, including branches without a first com
 
 | View | Contents and actions |
 | --- | --- |
-| **Files** | Expand folders on demand, see Git change markers, toggle hidden files, search by name or path, click to edit, and right-click to copy a path. |
+| **Files** | Expand folders on demand, see Git change markers, toggle hidden files, search by name or path, click to edit, and right-click for file actions. |
 | **Changes** | Browse unstaged, staged, and untracked files. Click an ordinary change to view a read-only diff, or a file under **CONFLICTS** to resolve it. |
 
 Press `⌘ E` to switch views and `⌘ R` to refresh Git. The Git sidebar reads the repository by default. **Mark resolved** in the conflict editor explicitly stages the current saved file. Commits, continuing a merge or rebase, resets, and branch changes remain terminal operations you control.
+
+Right-click a file to rename it, move it to Trash, reveal it in Finder, open it with the default application, or copy its path. **Copy Relative Path** uses the sidebar's project root. Changed files also offer unstaged/staged diffs or conflict resolution. Right-click a folder to create a file or folder; right-click empty space in Files to create items at the project root, refresh, or collapse all folders. Use `↑` / `↓` to select, `Enter` to execute, and `Esc` or an outside click to dismiss the menu.
+
+**Open in New Terminal** starts an independent shell in a new split, using the selected folder or a file's containing directory. Creating and renaming never overwrite an existing item. **Move to Trash** uses macOS Trash and never falls back to permanent deletion. Renaming or deleting an item with unsaved edits in the current editor prompts you to handle those edits first; affected unsaved edits in other windows or recovery drafts must be saved or closed first. Successful operations refresh the file tree and search results.
 
 <a id="file-search"></a>
 
@@ -302,6 +306,6 @@ Core components:
 
 The terminal core is pinned to official Alacritty commit [`54214706`](https://github.com/alacritty/alacritty/commit/542147067dd016fc5f49120ef0ba605a98a4e3a7), which includes limits on stored zero-width characters and fixes to the Kitty mode stack. This is a pinned development revision; rerun compatibility and resource tests when upgrading it.
 
-The project currently has 90 automated tests and one manual release benchmark. Automated coverage includes real PTYs, input and window sizing, the macOS space key, color output and environment variables, directory completion, shell startup configuration, Git status and worktrees, file reading and saving, Chinese fonts, tab-separated mixed-language filenames, control-message limits, child-process cleanup, layout migration, search cancellation and resource limits, editing undo, conflict parsing and single-file staging, and syntax highlighting with Unicode color-range mapping.
+The project currently has 103 automated tests and two manual release benchmarks. Automated coverage includes real PTYs, input and window sizing, the macOS space key, color output and environment variables, directory completion, shell startup configuration, Git status and worktrees, file reading and saving, context-menu selection and positioning, file creation and renaming without overwriting existing items, Chinese fonts, tab-separated mixed-language filenames, control-message limits, child-process cleanup, layout migration, search cancellation and resource limits, editing undo, conflict parsing and single-file staging, and syntax highlighting with Unicode color-range mapping.
 
 Window testing has covered splits, multiple windows, directory following, file search, editing and draft recovery, conflict resolution and undo, and JSON/TOML/Rust highlighting. The development preview continues to evolve; these checks do not imply that every terminal application or machine has been validated.

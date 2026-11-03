@@ -19,7 +19,7 @@ use winit::{
     window::{Theme, Window, WindowId},
 };
 
-use crate::{app, editor::RecoveryDraft, layout::Layout};
+use crate::{app, editor::RecoveryDraft, file_ops::FileOperation, layout::Layout};
 
 const MAX_RECOVERY_BYTES: usize = 32 * 1024 * 1024;
 const RECOVERY_DELAY: Duration = Duration::from_millis(500);
@@ -27,7 +27,19 @@ const RECOVERY_DELAY: Duration = Duration::from_millis(500);
 pub enum Event {
     Wake(u64),
     Window(u64, Box<app::Event>),
-    NewWindow { source: u64, cwd: PathBuf },
+    NewWindow {
+        source: u64,
+        cwd: PathBuf,
+    },
+    FileOperation {
+        source: u64,
+        operation: FileOperation,
+    },
+    FileOperationFinished {
+        source: u64,
+        operation: FileOperation,
+        result: Result<Option<PathBuf>, String>,
+    },
     Save,
     Quit,
 }
@@ -58,6 +70,23 @@ impl WindowProxy {
     }
     pub fn quit(&self) {
         let _ = self.proxy.send_event(Event::Quit);
+    }
+    pub fn request_file_operation(&self, operation: FileOperation) {
+        let _ = self.proxy.send_event(Event::FileOperation {
+            source: self.route,
+            operation,
+        });
+    }
+    pub fn finish_file_operation(
+        &self,
+        operation: FileOperation,
+        result: Result<Option<PathBuf>, String>,
+    ) {
+        let _ = self.proxy.send_event(Event::FileOperationFinished {
+            source: self.route,
+            operation,
+            result,
+        });
     }
 }
 
@@ -316,6 +345,7 @@ pub struct Windows {
     recovery_blocked: bool,
     recovery_error: Option<String>,
     unattached_recovery: Vec<RecoveryEntry>,
+    pending_file_operation: Option<(u64, FileOperation)>,
 }
 
 impl Windows {
@@ -334,6 +364,7 @@ impl Windows {
             recovery_blocked: false,
             recovery_error: None,
             unattached_recovery: Vec::new(),
+            pending_file_operation: None,
         }
     }
 
@@ -519,6 +550,9 @@ impl Windows {
             app.shutdown();
             return Err(error);
         }
+        if let Some((_, operation)) = &self.pending_file_operation {
+            app.set_file_operation_pending(Some(operation.clone()));
+        }
         self.order.push(id);
         self.routes.insert(route, id);
         self.windows.insert(id, app);
@@ -535,6 +569,15 @@ impl Windows {
         if closing.is_empty() {
             return;
         }
+        if self.pending_file_operation.is_some() {
+            for id in closing {
+                if let Some(app) = self.windows.get_mut(&id) {
+                    app.close_requested = false;
+                    app.notify("Wait for the file operation to finish before closing this window.");
+                }
+            }
+            return;
+        }
         // Keep the last window's layout for the next launch.
         self.save();
         for id in closing {
@@ -549,6 +592,60 @@ impl Windows {
             event_loop.exit();
         } else {
             self.save();
+        }
+    }
+
+    fn request_file_operation(&mut self, source: u64, operation: FileOperation) {
+        let Some(&source_id) = self.routes.get(&source) else {
+            return;
+        };
+        let blocked = if self.pending_file_operation.is_some() {
+            Some("Wait for the current file operation to finish.")
+        } else if self
+            .unattached_recovery
+            .iter()
+            .any(|entry| operation.affects(&entry.draft.path))
+        {
+            Some(
+                "An affected file has a recovery draft. Restore and save or close it before renaming/deleting.",
+            )
+        } else if self
+            .windows
+            .iter()
+            .any(|(id, app)| *id != source_id && app.file_operation_blocked(&operation))
+        {
+            Some("Save or close affected files in other windows before renaming/deleting.")
+        } else if self
+            .windows
+            .get(&source_id)
+            .is_some_and(|app| app.file_operation_blocked(&operation))
+        {
+            Some("Save or close affected files, and wait for loading or saving to finish.")
+        } else {
+            None
+        };
+        if let Some(message) = blocked {
+            if let Some(app) = self.windows.get_mut(&source_id) {
+                app.notify(message);
+            }
+            return;
+        }
+        self.pending_file_operation = Some((source, operation.clone()));
+        for app in self.windows.values_mut() {
+            app.set_file_operation_pending(Some(operation.clone()));
+        }
+        if !self
+            .windows
+            .get_mut(&source_id)
+            .is_some_and(|app| app.start_file_operation(operation))
+        {
+            self.pending_file_operation = None;
+            for app in self.windows.values_mut() {
+                app.set_file_operation_pending(None);
+            }
+            if let Some(app) = self.windows.get_mut(&source_id) {
+                app.notify("Workspace busy. Try the file operation again.");
+            }
         }
     }
 }
@@ -656,11 +753,42 @@ impl ApplicationHandler<Event> for Windows {
                     self.save();
                 }
             }
+            Event::FileOperation { source, operation } => {
+                self.request_file_operation(source, operation);
+            }
+            Event::FileOperationFinished {
+                source,
+                operation,
+                result,
+            } => {
+                if self
+                    .pending_file_operation
+                    .as_ref()
+                    .is_some_and(|(pending_source, _)| *pending_source == source)
+                {
+                    self.pending_file_operation = None;
+                    let source_id = self.routes.get(&source).copied();
+                    for (id, app) in &mut self.windows {
+                        app.set_file_operation_pending(None);
+                        app.finish_file_operation(&operation, &result, Some(*id) == source_id);
+                    }
+                    self.save();
+                    self.observe_drafts();
+                }
+            }
             Event::Save => {
                 self.save();
                 self.observe_drafts();
             }
             Event::Quit => {
+                if let Some((route, _)) = &self.pending_file_operation {
+                    if let Some(id) = self.routes.get(route)
+                        && let Some(app) = self.windows.get_mut(id)
+                    {
+                        app.notify("Wait for the file operation to finish before quitting.");
+                    }
+                    return;
+                }
                 if let Some(app) = self
                     .order
                     .iter()

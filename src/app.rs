@@ -16,8 +16,10 @@ use winit::{
 };
 
 use crate::{
+    context_menu::{ContextMenu, MenuCommand},
     editor::{Document, Movement, RecoveryDraft, SaveRequest, SavedFile},
     editor_view,
+    file_ops::{self, FileOperation},
     file_search::{FileSearch, SearchWorker},
     highlight::{HighlightWorker, Highlights},
     layout::{Axis, Bounds, Divider, Layout},
@@ -32,6 +34,15 @@ use crate::{
 
 const TOP: f32 = 0.0;
 const FOOT: f32 = 0.0;
+
+fn path_after_rename(source: &Path, destination: &Path, path: &Path) -> Option<PathBuf> {
+    let suffix = path.strip_prefix(source).ok()?;
+    Some(if suffix.as_os_str().is_empty() {
+        destination.to_owned()
+    } else {
+        destination.join(suffix)
+    })
+}
 
 pub enum Event {
     Wake,
@@ -66,9 +77,14 @@ pub enum Event {
         token: u64,
         result: Result<(), String>,
     },
+    FileOperationFinished {
+        operation: FileOperation,
+        result: Result<Option<PathBuf>, String>,
+    },
 }
 
 enum Job {
+    FileOperation(FileOperation),
     StageResolved {
         root: PathBuf,
         relative: PathBuf,
@@ -247,7 +263,49 @@ enum PendingAction {
     ClosePreview,
     CloseWindow,
     Split(Axis),
+    FileOperation(FileOperation),
+    TerminalAt(PathBuf),
     Quit,
+}
+
+enum FileNameAction {
+    NewFile(PathBuf),
+    NewDirectory(PathBuf),
+    Rename(PathBuf),
+}
+
+struct FileNamePrompt {
+    action: FileNameAction,
+    input: FileSearch,
+    error: Option<String>,
+}
+
+impl FileNamePrompt {
+    fn title(&self) -> &'static str {
+        match self.action {
+            FileNameAction::NewFile(_) => "New file",
+            FileNameAction::NewDirectory(_) => "New folder",
+            FileNameAction::Rename(_) => "Rename",
+        }
+    }
+
+    fn operation(&self) -> FileOperation {
+        let name = self.input.query.clone();
+        match &self.action {
+            FileNameAction::NewFile(parent) => FileOperation::CreateFile {
+                parent: parent.clone(),
+                name,
+            },
+            FileNameAction::NewDirectory(parent) => FileOperation::CreateDirectory {
+                parent: parent.clone(),
+                name,
+            },
+            FileNameAction::Rename(path) => FileOperation::Rename {
+                path: path.clone(),
+                name,
+            },
+        }
+    }
 }
 
 enum Prompt {
@@ -257,6 +315,7 @@ enum Prompt {
     Rename(String),
     Search(String),
     SaveChanges(PendingAction),
+    FileName(FileNamePrompt),
 }
 
 #[derive(Clone)]
@@ -289,6 +348,7 @@ struct Scene {
     dividers: Vec<Divider>,
     editor: Option<Bounds>,
     comparison: Option<Bounds>,
+    file_list: Option<Bounds>,
 }
 
 impl Scene {
@@ -390,6 +450,11 @@ pub struct App {
     recovery_pending: Option<RecoveryDraft>,
     next_preview: u64,
     prompt: Option<Prompt>,
+    context_menu: Option<ContextMenu>,
+    file_operation_pending: Option<FileOperation>,
+    refresh_after_operation: bool,
+    tree_selection: Option<PathBuf>,
+    reveal_tree_selection: bool,
     zoom: bool,
     toast: Option<(String, Instant)>,
     preedit: String,
@@ -405,6 +470,15 @@ impl App {
             .spawn(move || {
                 while let Ok(job) = rx.recv() {
                     let event = match job {
+                        Job::FileOperation(operation) => {
+                            let result =
+                                file_ops::execute(&operation).map_err(|error| format!("{error:#}"));
+                            if operation.mutates() {
+                                events.finish_file_operation(operation, result);
+                                continue;
+                            }
+                            Event::FileOperationFinished { operation, result }
+                        }
                         Job::StageResolved {
                             root,
                             relative,
@@ -542,6 +616,11 @@ impl App {
             recovery_pending: None,
             next_preview: 1,
             prompt: None,
+            context_menu: None,
+            file_operation_pending: None,
+            refresh_after_operation: false,
+            tree_selection: None,
+            reveal_tree_selection: false,
             zoom: false,
             toast: None,
             preedit: String::new(),
@@ -556,6 +635,336 @@ impl App {
     fn redraw(&self) {
         if let Some(w) = &self.window {
             w.request_redraw();
+        }
+    }
+
+    fn view_size(&self) -> (f32, f32) {
+        self.window.as_ref().map_or((960.0, 640.0), |window| {
+            let size = window.inner_size();
+            let scale = window.scale_factor() as f32;
+            (size.width as f32 / scale, size.height as f32 / scale)
+        })
+    }
+
+    fn preview_path(&self) -> Option<PathBuf> {
+        self.preview.as_ref().map(|preview| match &preview.source {
+            PreviewSource::Diff { root, change, .. } => root.join(&change.path),
+            source => source.path().to_owned(),
+        })
+    }
+
+    pub(crate) fn file_operation_blocked(&self, operation: &FileOperation) -> bool {
+        self.recovery_pending
+            .as_ref()
+            .is_some_and(|draft| operation.affects(&draft.path))
+            || self
+                .preview_path()
+                .is_some_and(|path| operation.affects(&path))
+                && (self.has_unsaved_file() || self.preview.as_ref().is_some_and(|p| p.loading))
+    }
+
+    pub(crate) fn set_file_operation_pending(&mut self, operation: Option<FileOperation>) {
+        self.file_operation_pending = operation;
+        self.context_menu = None;
+        self.editor_dragging = false;
+        self.preedit.clear();
+        self.redraw();
+    }
+
+    pub(crate) fn start_file_operation(&mut self, operation: FileOperation) -> bool {
+        self.worker.try_send(Job::FileOperation(operation)).is_ok()
+    }
+
+    fn request_file_operation(&mut self, operation: FileOperation) {
+        if self.file_operation_pending.is_some() {
+            self.notify("Wait for the current file operation to finish.");
+            return;
+        }
+        if operation.mutates() {
+            let affects_editor = self
+                .preview_path()
+                .is_some_and(|path| operation.affects(&path));
+            // Creating a file opens it after creation, so resolve the old editor first.
+            if (affects_editor || matches!(operation, FileOperation::CreateFile { .. }))
+                && self.has_unsaved_file()
+            {
+                self.request_leave(PendingAction::FileOperation(operation));
+            } else {
+                self.proxy.request_file_operation(operation);
+            }
+        } else if !self.start_file_operation(operation) {
+            self.notify("Workspace busy. Try again shortly.");
+        }
+    }
+
+    pub(crate) fn finish_file_operation(
+        &mut self,
+        operation: &FileOperation,
+        result: &Result<Option<PathBuf>, String>,
+        is_source: bool,
+    ) {
+        let destination = match result {
+            Ok(destination) => destination,
+            Err(error) => {
+                if is_source {
+                    self.notify(error.clone());
+                }
+                return;
+            }
+        };
+        if !operation.mutates() {
+            return;
+        }
+        let affected_preview = self.preview_path().filter(|path| operation.affects(path));
+        let renamed_path = |path: &Path| -> Option<PathBuf> {
+            let FileOperation::Rename { path: source, .. } = operation else {
+                return None;
+            };
+            path_after_rename(source, destination.as_ref()?, path)
+        };
+        self.expanded = self
+            .expanded
+            .iter()
+            .filter_map(|path| {
+                if operation.affects(path) {
+                    renamed_path(path)
+                } else {
+                    Some(path.clone())
+                }
+            })
+            .collect();
+        if let Some(pinned) = &self.pinned
+            && operation.affects(pinned)
+        {
+            self.pinned = renamed_path(pinned);
+        }
+        self.directories.clear();
+        if let Some(path) = affected_preview {
+            self.preview = None;
+            self.recovery_pending = None;
+            self.draft_revision += 1;
+            if let Some(path) = renamed_path(&path) {
+                self.open_preview(PreviewSource::File(path));
+            }
+        }
+        if is_source {
+            match (operation, destination) {
+                (FileOperation::CreateFile { parent, .. }, Some(path)) => {
+                    self.reveal_created_item(parent, path);
+                    self.show_preview(PreviewSource::File(path.clone()));
+                }
+                (FileOperation::CreateDirectory { parent, .. }, Some(path)) => {
+                    self.reveal_created_item(parent, path);
+                }
+                _ => {}
+            }
+            self.notify(match operation {
+                FileOperation::CreateFile { .. } => "File created.",
+                FileOperation::CreateDirectory { .. } => "Folder created.",
+                FileOperation::Rename { .. } => "Renamed.",
+                FileOperation::Trash { .. } => "Moved to Trash. Restore it from Finder if needed.",
+                _ => "Done.",
+            });
+        }
+        self.refresh_after_operation = self.busy;
+        self.refresh(true);
+        self.search_files();
+        self.redraw();
+    }
+
+    fn reveal_created_item(&mut self, parent: &Path, path: &Path) {
+        self.tree_selection = Some(path.to_owned());
+        self.reveal_tree_selection = true;
+        self.changes_view = false;
+        self.file_search.clear();
+        self.file_search.focused = false;
+        if path
+            .file_name()
+            .is_some_and(|name| name.to_string_lossy().starts_with('.'))
+        {
+            self.show_hidden = true;
+        }
+        let root = self
+            .workspace
+            .as_ref()
+            .map(|w| w.root.as_path())
+            .unwrap_or(&self.workspace_cwd);
+        for ancestor in parent
+            .ancestors()
+            .take_while(|p| *p != root && p.starts_with(root))
+        {
+            if self.expanded.len() < 31 {
+                self.expanded.insert(ancestor.to_owned());
+            }
+        }
+        self.sidebar_scroll = 0.0;
+    }
+
+    fn open_context_menu(&mut self) {
+        if self.prompt.is_some() || self.file_operation_pending.is_some() {
+            return;
+        }
+        if !self
+            .scene
+            .file_list
+            .is_some_and(|bounds| bounds.contains(self.mouse.0, self.mouse.1))
+        {
+            self.context_menu = None;
+            self.redraw();
+            return;
+        }
+        let root = self
+            .workspace
+            .as_ref()
+            .map(|w| w.root.clone())
+            .unwrap_or_else(|| self.workspace_cwd.clone());
+        let target = self.scene.hits.iter().rev().find_map(|(bounds, action)| {
+            if !bounds.contains(self.mouse.0, self.mouse.1) {
+                return None;
+            }
+            match action {
+                Action::File(path) | Action::Conflict(path) => Some((path.clone(), false)),
+                Action::Directory(path) => Some((path.clone(), true)),
+                Action::Diff(change, _) => Some((root.join(&change.path), false)),
+                _ => None,
+            }
+        });
+        if target.is_none() && self.changes_view {
+            return;
+        }
+        let (path, is_dir) = target.unwrap_or_else(|| (root.clone(), true));
+        let change = self
+            .workspace
+            .as_ref()
+            .and_then(|w| w.changes.iter().find(|c| w.root.join(&c.path) == path));
+        self.context_menu = Some(ContextMenu::new(
+            path.clone(),
+            root.clone(),
+            is_dir,
+            path == root,
+            change,
+            self.mouse,
+        ));
+        self.blur_file_search();
+        self.selection = None;
+        self.editor_dragging = false;
+        self.preedit.clear();
+        self.redraw();
+    }
+
+    fn activate_menu_item(&mut self, index: usize) {
+        let Some(menu) = self.context_menu.take() else {
+            return;
+        };
+        let Some(item) = menu.entries.get(index) else {
+            return;
+        };
+        if menu.is_root && matches!(item.command, MenuCommand::Rename | MenuCommand::Trash) {
+            return;
+        }
+        let path = menu.target;
+        match &item.command {
+            MenuCommand::CreateFile | MenuCommand::CreateDirectory | MenuCommand::Rename => {
+                let rename = matches!(item.command, MenuCommand::Rename);
+                let value = if rename {
+                    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+                        self.notify(
+                            "This filename cannot be edited as UTF-8. Rename it in Finder.",
+                        );
+                        return;
+                    };
+                    name.to_owned()
+                } else {
+                    String::new()
+                };
+                self.prompt = Some(Prompt::FileName(FileNamePrompt {
+                    action: match item.command {
+                        MenuCommand::CreateFile => FileNameAction::NewFile(path),
+                        MenuCommand::CreateDirectory => FileNameAction::NewDirectory(path),
+                        _ => FileNameAction::Rename(path),
+                    },
+                    input: FileSearch {
+                        cursor: value.len(),
+                        select_all: rename,
+                        query: value,
+                        ..FileSearch::default()
+                    },
+                    error: None,
+                }));
+            }
+            MenuCommand::Trash => self.request_file_operation(FileOperation::Trash { path }),
+            MenuCommand::Reveal => self.request_file_operation(FileOperation::Reveal { path }),
+            MenuCommand::OpenExternal => self.request_file_operation(FileOperation::Open { path }),
+            MenuCommand::OpenTerminal => {
+                let directory = if menu.is_dir {
+                    path
+                } else {
+                    path.parent().unwrap_or(&menu.root).to_owned()
+                };
+                self.request_leave(PendingAction::TerminalAt(directory));
+            }
+            MenuCommand::CopyPath | MenuCommand::CopyRelativePath => {
+                let copied = if matches!(item.command, MenuCommand::CopyRelativePath) {
+                    path.strip_prefix(&menu.root).unwrap_or(&path)
+                } else {
+                    &path
+                };
+                let value = if copied.as_os_str().is_empty() {
+                    ".".to_owned()
+                } else {
+                    copied.to_string_lossy().into_owned()
+                };
+                match self
+                    .clipboard
+                    .as_mut()
+                    .map(|clipboard| clipboard.set_text(value))
+                {
+                    Some(Ok(())) => self.notify("Path copied."),
+                    _ => self.notify("Cannot access the clipboard."),
+                }
+            }
+            MenuCommand::ViewChanges(kind) => {
+                if let Some(change) = self
+                    .workspace
+                    .as_ref()
+                    .and_then(|w| w.changes.iter().find(|c| w.root.join(&c.path) == path))
+                    .cloned()
+                {
+                    self.show_diff(change, *kind);
+                }
+            }
+            MenuCommand::Refresh => {
+                self.refresh(true);
+                self.search_files();
+            }
+            MenuCommand::CollapseAll => {
+                self.expanded.clear();
+                self.directories.retain(|p, _| p == &menu.root);
+                self.sidebar_scroll = 0.0;
+            }
+        }
+        self.redraw();
+    }
+
+    fn terminal_at(&mut self, cwd: &Path) {
+        if self.sessions.len() >= 32 {
+            self.notify("Pane limit reached (32).");
+            return;
+        }
+        let Some(old) = self.active_id() else {
+            return;
+        };
+        match self.create_session(cwd) {
+            Ok(id) => {
+                self.layout.split(old, id, Axis::Horizontal);
+                self.active = id;
+                self.preview = None;
+                self.zoom = false;
+                self.refresh(true);
+                self.save();
+                self.redraw();
+            }
+            Err(error) => self.notify(error.to_string()),
         }
     }
     fn active_id(&self) -> Option<u64> {
@@ -692,6 +1101,10 @@ impl App {
     }
 
     fn show_preview(&mut self, mut source: PreviewSource) {
+        if self.file_operation_pending.is_some() {
+            self.notify("Wait for the current file operation to finish.");
+            return;
+        }
         if let PreviewSource::File(path) = &source
             && let Some(workspace) = &self.workspace
             && workspace
@@ -835,6 +1248,11 @@ impl App {
     }
 
     fn request_leave(&mut self, pending: PendingAction) {
+        self.context_menu = None;
+        if self.file_operation_pending.is_some() {
+            self.notify("Wait for the current file operation to finish.");
+            return;
+        }
         if self
             .preview
             .as_ref()
@@ -864,6 +1282,8 @@ impl App {
             }
             PendingAction::CloseWindow => self.prompt = Some(Prompt::CloseWindow),
             PendingAction::Split(axis) => self.split(axis),
+            PendingAction::FileOperation(operation) => self.request_file_operation(operation),
+            PendingAction::TerminalAt(path) => self.terminal_at(&path),
             PendingAction::Quit => self.proxy.quit(),
         }
         self.redraw();
@@ -1514,6 +1934,11 @@ impl App {
     }
 
     fn activate(&mut self, action: Action, event_loop: &ActiveEventLoop) {
+        if self.file_operation_pending.is_some() {
+            self.notify("Wait for the current file operation to finish.");
+            return;
+        }
+        self.tree_selection = None;
         match action {
             Action::View(changes) => {
                 self.changes_view = changes;
@@ -1719,6 +2144,12 @@ impl App {
                 w: self.sidebar - 20.0,
                 h: (height - TOP - if self.changes_view { 215.0 } else { 254.0 }).max(1.0),
             };
+            s.file_list = Some(Bounds {
+                x: 0.0,
+                w: self.sidebar,
+                h: (height - list.y).max(0.0),
+                ..list
+            });
             self.sidebar_max = 0.0;
             if self.changes_view {
                 if let Some(ws) = &self.workspace {
@@ -1852,6 +2283,15 @@ impl App {
                 self.sidebar_max = (rows.len() as f32 * 28.0 - list.h
                     + if truncated { 28.0 } else { 0.0 })
                 .max(0.0);
+                if self.reveal_tree_selection
+                    && let Some(index) = rows
+                        .iter()
+                        .position(|(path, _, _, _)| self.tree_selection.as_ref() == Some(path))
+                {
+                    self.sidebar_scroll =
+                        (index as f32 * 28.0 - list.h / 2.0).clamp(0.0, self.sidebar_max);
+                    self.reveal_tree_selection = false;
+                }
                 let mut y = list.y - self.sidebar_scroll;
                 for (path, name, dir, depth) in rows {
                     let b = Bounds {
@@ -1861,15 +2301,23 @@ impl App {
                         h: 28.0,
                     };
                     if y >= list.y && y + b.h <= list.y + list.h {
-                        let selected = self.preview.as_ref().is_some_and(|preview| match &preview
-                            .source
-                        {
-                            PreviewSource::File(selected)
-                            | PreviewSource::Conflict { path: selected, .. } => selected == &path,
-                            PreviewSource::Diff { root, change, .. } => {
-                                root.join(&change.path) == path
-                            }
-                        });
+                        let selected = self.tree_selection.as_ref() == Some(&path)
+                            || self
+                                .context_menu
+                                .as_ref()
+                                .is_some_and(|menu| menu.target == path)
+                            || self
+                                .preview
+                                .as_ref()
+                                .is_some_and(|preview| match &preview.source {
+                                    PreviewSource::File(selected)
+                                    | PreviewSource::Conflict { path: selected, .. } => {
+                                        selected == &path
+                                    }
+                                    PreviewSource::Diff { root, change, .. } => {
+                                        root.join(&change.path) == path
+                                    }
+                                });
                         if selected {
                             s.rect(b, SURFACE);
                             s.rect(Bounds { w: 2.0, ..b }, GREEN);
@@ -2171,6 +2619,58 @@ impl App {
             s.rect(overlay, SURFACE);
             s.text(overlay.x + 8.0, overlay.y + 5.0, status, 11.0, FG, overlay);
         }
+        if let Some(menu) = &self.context_menu {
+            let bounds = menu.bounds(width, height);
+            // Glyphs are rendered after rectangles. Remove only text underneath the menu.
+            s.texts.retain(|text| {
+                text.y + text.line_height <= bounds.y
+                    || text.y >= bounds.y + bounds.h
+                    || text.clip[2] <= bounds.x
+                    || text.x >= bounds.x + bounds.w
+            });
+            s.rect(
+                Bounds {
+                    x: bounds.x + 3.0,
+                    y: bounds.y + 4.0,
+                    ..bounds
+                },
+                [0, 0, 0, 120],
+            );
+            s.rect(bounds, BORDER);
+            s.rect(
+                Bounds {
+                    x: bounds.x + 1.0,
+                    y: bounds.y + 1.0,
+                    w: (bounds.w - 2.0).max(0.0),
+                    h: (bounds.h - 2.0).max(0.0),
+                },
+                PANEL,
+            );
+            for (index, item) in menu.entries.iter().enumerate() {
+                let row = menu.item_bounds(index, width, height);
+                if item.separator_before {
+                    s.rect(
+                        Bounds {
+                            y: row.y - 4.0,
+                            h: 1.0,
+                            ..row
+                        },
+                        BORDER,
+                    );
+                }
+                if menu.selected == Some(index) {
+                    s.rect(row, SURFACE);
+                }
+                s.text(
+                    row.x + 10.0,
+                    row.y + 5.0,
+                    item.label,
+                    12.0,
+                    if item.destructive { RED } else { FG },
+                    row,
+                );
+            }
+        }
         if let Some(prompt) = &self.prompt {
             // Text is drawn after rectangles; omit underlying text for the modal.
             s.texts.clear();
@@ -2208,6 +2708,18 @@ impl App {
                     format!("{value}▏"),
                     "Enter to save · Esc to cancel",
                 ),
+                Prompt::FileName(prompt) => (
+                    prompt.title(),
+                    {
+                        let mut value = prompt.input.query.clone();
+                        value.insert_str(
+                            prompt.input.cursor.min(value.len()),
+                            &format!("{}▏", self.preedit),
+                        );
+                        value
+                    },
+                    "Enter to confirm · Esc to cancel · ⌘A select all",
+                ),
                 Prompt::SaveChanges(_) => (
                     "Save changes before leaving?",
                     self.preview
@@ -2235,7 +2747,51 @@ impl App {
                     ..b
                 },
             );
-            s.text(b.x + 26.0, b.y + 105.0, hint, 11.0, MUTED, b);
+            let error = match prompt {
+                Prompt::FileName(prompt) => prompt.error.as_deref(),
+                _ => None,
+            };
+            s.text(
+                b.x + 26.0,
+                b.y + 105.0,
+                error.unwrap_or(hint),
+                11.0,
+                if error.is_some() { RED } else { MUTED },
+                b,
+            );
+            if let Prompt::FileName(prompt) = prompt {
+                if prompt.input.select_all {
+                    s.rect(
+                        Bounds {
+                            x: b.x + 24.0,
+                            y: b.y + 66.0,
+                            w: (prompt.input.query.chars().count() as f32 * 8.0 + 10.0)
+                                .min(b.w - 48.0),
+                            h: 25.0,
+                        },
+                        [70, 100, 100, 130],
+                    );
+                }
+                if let Some(window) = &self.window {
+                    window.set_ime_cursor_area(
+                        LogicalPosition::new(b.x + 26.0, b.y + 91.0),
+                        LogicalSize::new(200.0, 25.0),
+                    );
+                }
+                for (index, label, confirm) in [(0, "Cancel", false), (1, "Confirm", true)] {
+                    s.button(
+                        Bounds {
+                            x: b.x + b.w - 238.0 + index as f32 * 112.0,
+                            y: b.y + 137.0,
+                            w: 100.0,
+                            h: 30.0,
+                        },
+                        label,
+                        Action::PromptConfirm(confirm),
+                        confirm,
+                    );
+                }
+            }
             if matches!(prompt, Prompt::SaveChanges(_)) {
                 for (index, label, choice) in [(0, "Save", 1), (1, "Discard", 2), (2, "Cancel", 0)]
                 {
@@ -2836,6 +3392,15 @@ impl App {
             Prompt::Quit => self.proxy.quit(),
             Prompt::CloseWindow => self.close_requested = true,
             Prompt::SaveChanges(_) => {}
+            Prompt::FileName(mut prompt) => {
+                if let Err(error) = file_ops::validate_name(&prompt.input.query) {
+                    prompt.error = Some(error.to_string());
+                    self.prompt = Some(Prompt::FileName(prompt));
+                } else {
+                    self.preedit.clear();
+                    self.request_file_operation(prompt.operation());
+                }
+            }
             Prompt::Rename(value) => {
                 if !value.trim().is_empty() {
                     self.name = value.chars().take(32).collect();
@@ -2855,6 +3420,86 @@ impl App {
     }
 
     fn key(&mut self, key: Key, text: Option<&str>, event_loop: &ActiveEventLoop) {
+        if let Some(menu) = &mut self.context_menu {
+            match key {
+                Key::Named(NamedKey::Escape) => self.context_menu = None,
+                Key::Named(NamedKey::ArrowUp) => menu.move_selection(true),
+                Key::Named(NamedKey::ArrowDown) => menu.move_selection(false),
+                Key::Named(NamedKey::Enter) => {
+                    if let Some(index) = menu.selected {
+                        self.activate_menu_item(index);
+                    }
+                }
+                _ => {}
+            }
+            self.redraw();
+            return;
+        }
+        if self.file_operation_pending.is_some() && self.preview.is_some() {
+            self.notify("Wait for the current file operation to finish.");
+            return;
+        }
+        if matches!(self.prompt, Some(Prompt::FileName(_))) {
+            match &key {
+                Key::Named(NamedKey::Escape) => {
+                    self.prompt = None;
+                    self.preedit.clear();
+                }
+                Key::Named(NamedKey::Enter) if self.preedit.is_empty() => {
+                    self.confirm_prompt(event_loop)
+                }
+                _ => {
+                    let pasted = if self.modifiers.super_key()
+                        && matches!(&key, Key::Character(ch) if ch.eq_ignore_ascii_case("v"))
+                    {
+                        self.clipboard.as_mut().and_then(|c| c.get_text().ok())
+                    } else {
+                        None
+                    };
+                    if let Some(Prompt::FileName(prompt)) = &mut self.prompt {
+                        prompt.error = None;
+                        if self.modifiers.super_key() {
+                            match &key {
+                                Key::Character(ch) if ch.eq_ignore_ascii_case("a") => {
+                                    prompt.input.select_all = true
+                                }
+                                _ => {
+                                    if let Some(value) = pasted {
+                                        prompt.input.insert(&value);
+                                    }
+                                }
+                            }
+                        } else if self.preedit.is_empty() {
+                            match key {
+                                Key::Named(NamedKey::Backspace) => {
+                                    prompt.input.backspace();
+                                }
+                                Key::Named(NamedKey::Delete) => {
+                                    prompt.input.delete();
+                                }
+                                Key::Named(NamedKey::ArrowLeft) => prompt.input.move_cursor(false),
+                                Key::Named(NamedKey::ArrowRight) => prompt.input.move_cursor(true),
+                                Key::Named(NamedKey::Home) => {
+                                    prompt.input.cursor = 0;
+                                    prompt.input.select_all = false;
+                                }
+                                Key::Named(NamedKey::End) => {
+                                    prompt.input.cursor = prompt.input.query.len();
+                                    prompt.input.select_all = false;
+                                }
+                                _ => {
+                                    if let Some(text) = text {
+                                        prompt.input.insert(text);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            self.redraw();
+            return;
+        }
         if matches!(self.prompt, Some(Prompt::SaveChanges(_))) {
             match &key {
                 Key::Named(NamedKey::Escape) => self.resolve_save_prompt(0),
@@ -3177,6 +3822,9 @@ impl App {
                     self.redraw();
                 }
             }
+            Event::FileOperationFinished { operation, result } => {
+                self.finish_file_operation(&operation, &result, true)
+            }
             Event::Wake => {
                 if self.preview.is_none()
                     && self
@@ -3203,6 +3851,11 @@ impl App {
                 directories,
             } => {
                 self.busy = false;
+                if self.refresh_after_operation {
+                    self.refresh_after_operation = false;
+                    self.refresh(true);
+                    return;
+                }
                 if cwd != self.active_cwd() || hidden != self.show_hidden {
                     self.refresh(true);
                     return;
@@ -3375,6 +4028,7 @@ impl App {
                 self.redraw();
             }
             WindowEvent::Resized(size) => {
+                self.context_menu = None;
                 if let Some(r) = &mut self.renderer {
                     r.resize(size.width, size.height);
                 }
@@ -3396,7 +4050,14 @@ impl App {
             }
             WindowEvent::Ime(Ime::Commit(text)) => {
                 self.preedit.clear();
-                if let Some(Prompt::Rename(value) | Prompt::Search(value)) = &mut self.prompt {
+                if self.context_menu.is_some() || self.file_operation_pending.is_some() {
+                    return;
+                }
+                if let Some(Prompt::FileName(prompt)) = &mut self.prompt {
+                    prompt.input.insert(&text);
+                    prompt.error = None;
+                } else if let Some(Prompt::Rename(value) | Prompt::Search(value)) = &mut self.prompt
+                {
                     value.extend(
                         text.chars()
                             .take(256usize.saturating_sub(value.chars().count())),
@@ -3428,6 +4089,7 @@ impl App {
             }
             WindowEvent::Focused(focused) => {
                 if !focused {
+                    self.context_menu = None;
                     self.modifiers = ModifiersState::empty();
                     self.preedit.clear();
                     self.selection = None;
@@ -3451,6 +4113,15 @@ impl App {
                     .map(|w| w.scale_factor())
                     .unwrap_or(1.0) as f32;
                 self.mouse = (position.x as f32 / scale, position.y as f32 / scale);
+                let (width, height) = self.view_size();
+                if let Some(menu) = &mut self.context_menu {
+                    menu.selected = menu.item_at(self.mouse.0, self.mouse.1, width, height);
+                    if let Some(window) = &self.window {
+                        window.set_cursor(CursorIcon::Default);
+                    }
+                    self.redraw();
+                    return;
+                }
                 if self.prompt.is_some() {
                     if let Some(window) = &self.window {
                         let over_button = self.scene.hits.iter().any(|(bounds, action)| {
@@ -3590,6 +4261,32 @@ impl App {
                     }
                     return;
                 }
+                if self.context_menu.is_some() {
+                    let (width, height) = self.view_size();
+                    let item = self
+                        .context_menu
+                        .as_ref()
+                        .and_then(|menu| menu.item_at(self.mouse.0, self.mouse.1, width, height));
+                    if let Some(index) = item {
+                        self.activate_menu_item(index);
+                    } else {
+                        self.context_menu = None;
+                        self.redraw();
+                    }
+                    return;
+                }
+                if self.file_operation_pending.is_some() {
+                    return;
+                }
+                if self.modifiers.control_key()
+                    && self
+                        .scene
+                        .file_list
+                        .is_some_and(|bounds| bounds.contains(self.mouse.0, self.mouse.1))
+                {
+                    self.open_context_menu();
+                    return;
+                }
                 let search_control = self.scene.hits.iter().any(|(bounds, action)| {
                     bounds.contains(self.mouse.0, self.mouse.1)
                         && matches!(action, Action::FocusFileSearch | Action::ClearFileSearch)
@@ -3661,27 +4358,13 @@ impl App {
                 button: MouseButton::Right,
                 ..
             } => {
-                if self.prompt.is_some() {
-                    return;
-                }
-                let path = self
-                    .scene
-                    .hits
-                    .iter()
-                    .find(|(b, _)| b.contains(self.mouse.0, self.mouse.1))
-                    .and_then(|(_, a)| match a {
-                        Action::File(p) | Action::Directory(p) | Action::Conflict(p) => {
-                            Some(p.clone())
-                        }
-                        Action::Diff(c, _) => self.workspace.as_ref().map(|w| w.root.join(&c.path)),
-                        _ => None,
-                    });
-                if let (Some(p), Some(c)) = (path, &mut self.clipboard) {
-                    let _ = c.set_text(p.to_string_lossy().into_owned());
-                    self.notify("Path copied.");
-                }
+                self.open_context_menu();
             }
             WindowEvent::MouseWheel { delta, .. } => {
+                if self.context_menu.take().is_some() {
+                    self.redraw();
+                    return;
+                }
                 if self.prompt.is_some() {
                     return;
                 }
@@ -3843,6 +4526,33 @@ fn status_color(c: char) -> [u8; 4] {
 #[cfg(test)]
 mod editor_integration_tests {
     use super::*;
+
+    #[test]
+    fn renamed_preview_paths_preserve_files_and_descendants() {
+        let renamed = path_after_rename(
+            Path::new("/project/old.txt"),
+            Path::new("/project/new.txt"),
+            Path::new("/project/old.txt"),
+        )
+        .unwrap();
+        assert_eq!(renamed.as_os_str(), "/project/new.txt");
+        assert_eq!(
+            path_after_rename(
+                Path::new("/project/old"),
+                Path::new("/project/new"),
+                Path::new("/project/old/sub/file.txt")
+            ),
+            Some(PathBuf::from("/project/new/sub/file.txt"))
+        );
+        assert!(
+            path_after_rename(
+                Path::new("/project/old"),
+                Path::new("/project/new"),
+                Path::new("/project/older/file.txt")
+            )
+            .is_none()
+        );
+    }
 
     #[test]
     fn choosing_conflicts_and_undo_refresh_the_result_and_save_gate() {

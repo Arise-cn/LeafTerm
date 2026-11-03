@@ -14,7 +14,7 @@ Your agent’s terminal. Your code, in view.
 </p>
 
 <p>
-  <img src="https://img.shields.io/badge/version-v0.1.2-6DDEAA?style=flat-square" alt="版本 0.1.2" />
+  <img src="https://img.shields.io/badge/version-v0.1.3-6DDEAA?style=flat-square" alt="版本 0.1.3" />
   <img src="https://img.shields.io/badge/Rust-native-DEA584?style=flat-square&amp;logo=rust&amp;logoColor=white" alt="Built with Rust" />
   <img src="https://img.shields.io/badge/Metal-GPU_rendered-6DDEAA?style=flat-square" alt="Metal GPU rendering" />
   <img src="https://img.shields.io/badge/macOS-Apple_Silicon-9AAEB8?style=flat-square&amp;logo=apple&amp;logoColor=white" alt="Developed on macOS Apple Silicon" />
@@ -23,12 +23,12 @@ Your agent’s terminal. Your code, in view.
 </p>
 
 <p>
-  <a href="https://github.com/Arise-cn/LeafTerm/releases/download/v0.1.2/LeafTerm-0.1.2-macos-arm64.zip"><img src="https://img.shields.io/badge/%E4%B8%8B%E8%BD%BD-macOS_Apple_Silicon-6DDEAA?style=for-the-badge&amp;logo=apple&amp;logoColor=0C1114" alt="下载适用于 macOS Apple Silicon 的 LeafTerm" /></a>
+  <a href="https://github.com/Arise-cn/LeafTerm/releases/download/v0.1.3/LeafTerm-0.1.3-macos-arm64.zip"><img src="https://img.shields.io/badge/%E4%B8%8B%E8%BD%BD-macOS_Apple_Silicon-6DDEAA?style=for-the-badge&amp;logo=apple&amp;logoColor=0C1114" alt="下载适用于 macOS Apple Silicon 的 LeafTerm" /></a>
   <br />
-  <sub>v0.1.2 预览版 · ZIP · <a href="https://github.com/Arise-cn/LeafTerm/releases/tag/v0.1.2">版本说明</a></sub>
+  <sub>v0.1.3 预览版 · ZIP · <a href="https://github.com/Arise-cn/LeafTerm/releases/tag/v0.1.3">版本说明</a></sub>
 </p>
 
-[快速开始](#quick-start) · [功能一览](#features) · [常用快捷键](#shortcuts) · [完整指南](docs/guide.zh-CN.md) · [反馈问题](https://github.com/Arise-cn/LeafTerm/issues)
+[快速开始](#quick-start) · [功能一览](#features) · [常用快捷键](#shortcuts) · [完整指南](docs/guide.zh-CN.md) · [更新记录](CHANGELOG.md) · [反馈问题](https://github.com/Arise-cn/LeafTerm/issues)
 
 </div>
 
@@ -54,7 +54,7 @@ AI 已经在终端里写代码，查看分支、检查改动、调整配置、�
 | | 你可以做什么 |
 | :--- | :--- |
 | **看见 AI 的改动** | 在侧栏查看当前分支、文件状态和 Diff，区分已暂存、未暂存、未跟踪和冲突文件。支持 Git worktree。 |
-| **快速找到文件** | `⌘P` 搜索文件名或相对路径，覆盖未展开的目录；按需展开文件树，显示 Git 变更标记。 |
+| **快速找到文件** | `⌘P` 搜索文件名或相对路径，覆盖未展开的目录；按需展开文件树，显示 Git 变更标记，右键打开文件操作菜单。 |
 | **顺手改个配置** | 点击文本文件直接编辑，语法高亮、`⌘S` 保存、`⌘Z` 撤销；外部修改检测帮助避免覆盖 AI 刚写入的内容。 |
 | **直观解决冲突** | 对比 Current / Incoming，保留一方或双方，在结果区手动调整；操作可撤销，保存后显式标记解决。 |
 | **按你的方式排布** | 快捷键新建窗口、左右／上下分屏、切换焦点、最大化当前分屏；拖动分隔线调整比例。 |
@@ -66,7 +66,7 @@ AI 已经在终端里写代码，查看分支、检查改动、调整配置、�
 
 ## 快速开始
 
-1. [下载 LeafTerm v0.1.2 macOS Apple Silicon 版](https://github.com/Arise-cn/LeafTerm/releases/download/v0.1.2/LeafTerm-0.1.2-macos-arm64.zip)，解压 ZIP。
+1. [下载 LeafTerm v0.1.3 macOS Apple Silicon 版](https://github.com/Arise-cn/LeafTerm/releases/download/v0.1.3/LeafTerm-0.1.3-macos-arm64.zip)，解压 ZIP。
 2. 将 `LeafTerm.app` 拖入**应用程序**文件夹（`/Applications`）。
 3. 打开 LeafTerm。如果 macOS 拦截启动，请按下方[首次打开说明](#macos-first-launch)处理。
 

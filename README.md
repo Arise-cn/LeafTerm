@@ -14,7 +14,7 @@ Keep the workflow. Skip the extra IDE.
 </p>
 
 <p>
-  <img src="https://img.shields.io/badge/version-v0.1.2-6DDEAA?style=flat-square" alt="Version 0.1.2" />
+  <img src="https://img.shields.io/badge/version-v0.1.3-6DDEAA?style=flat-square" alt="Version 0.1.3" />
   <img src="https://img.shields.io/badge/Rust-native-DEA584?style=flat-square&amp;logo=rust&amp;logoColor=white" alt="Built with Rust" />
   <img src="https://img.shields.io/badge/Metal-GPU_rendered-6DDEAA?style=flat-square" alt="Metal GPU rendering" />
   <img src="https://img.shields.io/badge/macOS-Apple_Silicon-9AAEB8?style=flat-square&amp;logo=apple&amp;logoColor=white" alt="Developed on macOS Apple Silicon" />
@@ -23,12 +23,12 @@ Keep the workflow. Skip the extra IDE.
 </p>
 
 <p>
-  <a href="https://github.com/Arise-cn/LeafTerm/releases/download/v0.1.2/LeafTerm-0.1.2-macos-arm64.zip"><img src="https://img.shields.io/badge/Download-macOS_Apple_Silicon-6DDEAA?style=for-the-badge&amp;logo=apple&amp;logoColor=0C1114" alt="Download LeafTerm for macOS Apple Silicon" /></a>
+  <a href="https://github.com/Arise-cn/LeafTerm/releases/download/v0.1.3/LeafTerm-0.1.3-macos-arm64.zip"><img src="https://img.shields.io/badge/Download-macOS_Apple_Silicon-6DDEAA?style=for-the-badge&amp;logo=apple&amp;logoColor=0C1114" alt="Download LeafTerm for macOS Apple Silicon" /></a>
   <br />
-  <sub>v0.1.2 preview · ZIP · <a href="https://github.com/Arise-cn/LeafTerm/releases/tag/v0.1.2">Release notes</a></sub>
+  <sub>v0.1.3 preview · ZIP · <a href="https://github.com/Arise-cn/LeafTerm/releases/tag/v0.1.3">Release notes</a></sub>
 </p>
 
-[Quick start](#quick-start) · [Features](#features) · [Shortcuts](#shortcuts) · [User guide](docs/guide.md) · [Report an issue](https://github.com/Arise-cn/LeafTerm/issues)
+[Quick start](#quick-start) · [Features](#features) · [Shortcuts](#shortcuts) · [User guide](docs/guide.md) · [Changelog](CHANGELOG.md) · [Report an issue](https://github.com/Arise-cn/LeafTerm/issues)
 
 </div>
 
@@ -54,7 +54,7 @@ Your AI agent is already writing code in the terminal. But checking a branch, re
 | | What you can do |
 | :--- | :--- |
 | **Review your agent’s changes** | See the current branch, file status, and diffs in the sidebar. Distinguish staged, unstaged, untracked, and conflicted files. Git worktrees are supported. |
-| **Find a file quickly** | Press `⌘P` to search filenames and relative paths, including folders you haven’t expanded. Browse the file tree with Git change markers. |
+| **Find a file quickly** | Press `⌘P` to search filenames and relative paths, including folders you haven’t expanded. Browse the file tree with Git change markers and right-click for file actions. |
 | **Make that small edit** | Open a text file, edit with syntax highlighting, save with `⌘S`, and undo with `⌘Z`. External change detection helps protect edits your agent has just written. |
 | **Resolve conflicts visually** | Compare Current and Incoming, keep either side or both, and adjust the result by hand. Undo a choice, save the result, then explicitly mark the file resolved. |
 | **Arrange your workspace** | Use shortcuts for new windows, horizontal or vertical splits, pane focus, and pane zoom. Drag dividers to adjust the layout. |
@@ -66,7 +66,7 @@ Underneath it all: a real local shell and PTY, ANSI 16-color / 256-color / truec
 
 ## Quick start
 
-1. [Download LeafTerm v0.1.2 for macOS Apple Silicon](https://github.com/Arise-cn/LeafTerm/releases/download/v0.1.2/LeafTerm-0.1.2-macos-arm64.zip) and unzip it.
+1. [Download LeafTerm v0.1.3 for macOS Apple Silicon](https://github.com/Arise-cn/LeafTerm/releases/download/v0.1.3/LeafTerm-0.1.3-macos-arm64.zip) and unzip it.
 2. Drag `LeafTerm.app` into **Applications** (`/Applications`).
 3. Open LeafTerm. If macOS blocks the app, follow the [first launch instructions](#macos-first-launch) below.
 

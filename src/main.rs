@@ -1,6 +1,8 @@
 mod app;
+mod context_menu;
 mod editor;
 mod editor_view;
+mod file_ops;
 mod file_search;
 mod highlight;
 mod layout;
