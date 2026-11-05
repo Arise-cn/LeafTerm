@@ -386,6 +386,40 @@ impl Scene {
             clip: [clip.x, clip.y, clip.x + clip.w, clip.y + clip.h],
         });
     }
+
+    fn occlude_text(&mut self, bounds: Bounds) {
+        // Rectangles are painted before glyphs. Keep each run's original layout,
+        // but split its clip so only the part covered by the menu disappears.
+        for text in std::mem::take(&mut self.texts) {
+            let [left, top, right, bottom] = text.clip;
+            let covered_left = left.max(bounds.x);
+            let covered_top = top.max(bounds.y);
+            let covered_right = right.min(bounds.x + bounds.w);
+            let covered_bottom = bottom.min(bounds.y + bounds.h);
+            if covered_left >= covered_right
+                || covered_top >= covered_bottom
+                || text.y + text.line_height <= covered_top
+                || text.y >= covered_bottom
+            {
+                self.texts.push(text);
+                continue;
+            }
+            for clip in [
+                [left, top, right, covered_top],
+                [left, covered_bottom, right, bottom],
+                [left, covered_top, covered_left, covered_bottom],
+                [covered_right, covered_top, right, covered_bottom],
+            ] {
+                if clip[0] < clip[2] && clip[1] < clip[3] {
+                    self.texts.push(TextRun {
+                        clip,
+                        ..text.clone()
+                    });
+                }
+            }
+        }
+    }
+
     fn button(&mut self, b: Bounds, label: impl Into<String>, action: Action, active: bool) {
         if active {
             self.rect(b, SURFACE);
@@ -2621,13 +2655,7 @@ impl App {
         }
         if let Some(menu) = &self.context_menu {
             let bounds = menu.bounds(width, height);
-            // Glyphs are rendered after rectangles. Remove only text underneath the menu.
-            s.texts.retain(|text| {
-                text.y + text.line_height <= bounds.y
-                    || text.y >= bounds.y + bounds.h
-                    || text.clip[2] <= bounds.x
-                    || text.x >= bounds.x + bounds.w
-            });
+            s.occlude_text(bounds);
             s.rect(
                 Bounds {
                     x: bounds.x + 3.0,
@@ -4628,5 +4656,155 @@ mod editor_integration_tests {
         assert!(preview.notice.contains("remain unsaved"));
         assert!(!preview.saving);
         assert_eq!(std::fs::read_to_string(path).unwrap(), "enabled = true\n");
+    }
+}
+
+#[cfg(test)]
+mod scene_tests {
+    use super::*;
+
+    fn covers(run: &TextRun, x: f32, y: f32) -> bool {
+        let [left, top, right, bottom] = run.clip;
+        left <= x && x < right && top <= y && y < bottom
+    }
+
+    #[test]
+    fn menu_keeps_file_icon_and_name_visible_outside_its_bounds() {
+        let mut scene = Scene::default();
+        let row = Bounds {
+            x: 14.0,
+            y: 25.0,
+            w: 268.0,
+            h: 28.0,
+        };
+        scene.text(20.0, 30.0, "·", 12.0, MUTED, row);
+        scene.text(
+            39.0,
+            30.0,
+            "Cargo.toml",
+            12.0,
+            FG,
+            Bounds {
+                x: 39.0,
+                w: 210.0,
+                ..row
+            },
+        );
+        assert_eq!(scene.texts.len(), 2);
+        assert!(scene.texts.iter().all(|run| covers(run, 100.0, 45.0)));
+
+        scene.occlude_text(Bounds {
+            x: 90.0,
+            y: 38.0,
+            w: 240.0,
+            h: 222.0,
+        });
+        for (label, left_x) in [("·", 20.0), ("Cargo.toml", 50.0)] {
+            for (x, y) in [(left_x, 45.0), (100.0, 35.0)] {
+                assert_eq!(
+                    scene
+                        .texts
+                        .iter()
+                        .filter(|run| run.text == label && covers(run, x, y))
+                        .count(),
+                    1,
+                    "{label} must remain visible outside the menu at ({x}, {y})"
+                );
+            }
+        }
+        assert!(scene.texts.iter().all(|run| !covers(run, 100.0, 45.0)));
+    }
+
+    #[test]
+    fn menu_clipping_covers_each_visible_pixel_once_and_preserves_text_layout() {
+        let mut scene = Scene::default();
+        scene.text(
+            3.0,
+            0.0,
+            "styled",
+            24.0,
+            FG,
+            Bounds {
+                x: 0.0,
+                y: 0.0,
+                w: 100.0,
+                h: 40.0,
+            },
+        );
+        let original = &mut scene.texts[0];
+        original.bold = true;
+        original.italic = true;
+        original.colors.push(crate::renderer::ColorSpan {
+            range: 0..3,
+            color: GREEN,
+        });
+        let original = original.clone();
+        scene.occlude_text(Bounds {
+            x: 25.0,
+            y: 10.0,
+            w: 50.0,
+            h: 20.0,
+        });
+
+        for y in 0..40 {
+            for x in 0..100 {
+                let count = scene
+                    .texts
+                    .iter()
+                    .filter(|run| covers(run, x as f32 + 0.5, y as f32 + 0.5))
+                    .count();
+                let covered = (25..75).contains(&x) && (10..30).contains(&y);
+                assert_eq!(count, usize::from(!covered), "pixel ({x}, {y})");
+            }
+        }
+        for run in &scene.texts {
+            assert_eq!(
+                (run.x, run.y, run.font_size, run.line_height),
+                (
+                    original.x,
+                    original.y,
+                    original.font_size,
+                    original.line_height
+                )
+            );
+            assert_eq!(
+                (&run.text, &run.colors, run.color, run.bold, run.italic),
+                (
+                    &original.text,
+                    &original.colors,
+                    original.color,
+                    original.bold,
+                    original.italic
+                )
+            );
+        }
+    }
+
+    #[test]
+    fn fully_hidden_text_is_removed_while_disjoint_and_touching_text_stays_intact() {
+        let row = Bounds {
+            x: 10.0,
+            y: 10.0,
+            w: 100.0,
+            h: 28.0,
+        };
+        for menu in [
+            Bounds { x: 120.0, ..row },
+            Bounds { x: 110.0, ..row },
+            Bounds { x: -90.0, ..row },
+            Bounds { y: 38.0, ..row },
+            Bounds { y: -18.0, ..row },
+        ] {
+            let mut scene = Scene::default();
+            scene.text(15.0, 15.0, "unchanged", 12.0, FG, row);
+            scene.occlude_text(menu);
+            assert_eq!(scene.texts.len(), 1);
+            assert_eq!(scene.texts[0].clip, [10.0, 10.0, 110.0, 38.0]);
+            assert_eq!(scene.texts[0].text, "unchanged");
+        }
+        let mut scene = Scene::default();
+        scene.text(15.0, 15.0, "hidden", 12.0, FG, row);
+        scene.occlude_text(row);
+        assert!(scene.texts.is_empty());
     }
 }

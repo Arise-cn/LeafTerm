@@ -1,5 +1,29 @@
 # Changelog / 更新记录
 
+## v0.1.4 — 2026-11-05
+
+### 右键菜单渲染修复
+
+- 修复右键菜单弹出后，菜单外的文件名、图标和预览文字也被清空的问题。
+- 仅裁剪菜单实际遮挡的文字区域，保留周围内容和原有文字布局。
+
+### Context-menu rendering fix
+
+- Fix file names, icons, and preview text disappearing outside an open context menu.
+- Clip only the text covered by the menu, preserving surrounding content and the original text layout.
+
+### 验证与下载 / Validation and download
+
+106 项自动化测试通过；2 项手动性能基准未在本次修复中运行。格式和 Clippy 检查通过。实际窗口验证涵盖菜单两侧文字显示、关闭菜单后恢复，以及普通点击打开文件。
+
+106 automated tests passed; the two manual performance benchmarks were not run for this fix. Formatting and Clippy checks passed. Window checks covered text on both sides of the menu, restoration after dismissal, and opening files with a normal click.
+
+[下载 / Download: macOS Apple Silicon ZIP](https://github.com/Arise-cn/LeafTerm/releases/download/v0.1.4/LeafTerm-0.1.4-macos-arm64.zip) · [GitHub Release](https://github.com/Arise-cn/LeafTerm/releases/tag/v0.1.4)
+
+macOS Apple Silicon 开发预览版，使用 ad-hoc 签名，未经过 Apple Developer ID 签名或 Apple 公证。Windows 版本仍在开发中。
+
+Development preview for macOS Apple Silicon, with an ad-hoc signature; it is not signed with Apple Developer ID or notarized by Apple. Windows support remains in development.
+
 ## v0.1.3 — 2026-11-03
 
 ### 文件树右键菜单
